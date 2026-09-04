@@ -850,6 +850,7 @@
     analiz: null, // analizEt() sonucu
     grupDahil: false, // DM hesabında grup konuşmaları da sayılsın mı (varsayılan: hayır)
     secilenler: new Set(), // seçili hesapların norm adları (sekmeler arası ortak)
+    manuelIsletme: new Set(), // elle "işletme" olarak işaretlenen norm adlar
     liste: {
       sekme: 'takipEtmeyenler',
       arama: '',
@@ -867,6 +868,7 @@
       kullaniciAdim: durum.kullaniciAdim,
       simdiMs: Date.now(),
       grupDahil: durum.grupDahil,
+      manuelIsletme: durum.manuelIsletme,
       // [[ANALİZ ÇAĞRISI: seçenekler]]
     });
   }
@@ -1315,6 +1317,11 @@
       });
       kap.appendChild(el('label', { class: 'satir' }, [grupKutu, 'Grup konuşmalarını da say (varsayılan: kapalı)']));
     }
+    if (tanim.ad === 'isletme') {
+      kap.appendChild(
+        el('p', { class: 'sessiz', text: 'Bir hesabı herhangi bir sekmede "İşletme olarak işaretle" düğmesiyle buraya ekleyebilir, aynı düğmeyle işareti kaldırabilirsiniz. Elle işaretler yalnızca bu tarayıcıda tutulur.' })
+      );
+    }
     // [[LİSTE: sekme ek]]
 
     // Araç çubuğu: arama, sıralama, filtreler
@@ -1423,8 +1430,32 @@
     ]);
   }
 
-  function cizIsletmeHucresi(h, _yenidenCiz) {
-    return [el('span', { class: h.isletme.durum === 'dogrulanamaz' ? 'sessiz' : '', text: isletmeMetni(h) })];
+  // Elle işletme etiketi: yalnızca yerel bir işaret. Instagram'a hiçbir şey sorulmaz/yazılmaz.
+  function isletmeEtiketiDegistir(h) {
+    if (durum.manuelIsletme.has(h.norm)) durum.manuelIsletme.delete(h.norm);
+    else durum.manuelIsletme.add(h.norm);
+    // Analizi baştan çalıştırmak yerine yalnızca bu hesabın durumunu ve işletme listesini güncelle.
+    h.isletme = isletmeDurumu(h, durum.manuelIsletme);
+    const tanim = LISTE_TANIMLARI.find((t) => t.ad === 'isletme');
+    durum.analiz.listeler.isletme = durum.analiz.hesaplar.filter(tanim.yuklem).map((x) => x.norm);
+    // [[İŞLETME: kaydet]]
+  }
+
+  function cizIsletmeHucresi(h, yenidenCiz) {
+    const veridenGeliyor = h.isletme.durum === 'veriEvet';
+    const elleIsaretli = durum.manuelIsletme.has(h.norm);
+    const dugme = el('button', {
+      class: 'kucuk',
+      text: elleIsaretli ? 'İşareti kaldır' : 'İşletme olarak işaretle',
+      title: veridenGeliyor ? 'Veride zaten işletme olarak belirtilmiş; elle işaret buna ek tutulur.' : 'Yalnızca yerel bir etiket ekler',
+      onclick: () => {
+        isletmeEtiketiDegistir(h);
+        yenidenCiz();
+        // Sekme sayaçları değiştiği için üst düzey yeniden çizim
+        ciz();
+      },
+    });
+    return [el('span', { class: h.isletme.durum === 'dogrulanamaz' ? 'sessiz' : '', text: isletmeMetni(h) }), el('br'), dugme];
   }
 
   function cizKuyruk(kap) {
