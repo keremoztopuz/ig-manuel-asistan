@@ -860,6 +860,7 @@
     .kart.vurgulu { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
     tr.vurgulu td { background: var(--bg2); }
     textarea { width: 100%; resize: vertical; }
+    .rozet { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 10px; font-size: 11px; background: var(--bg2); color: var(--muted); border: 1px solid var(--border); }
     /* [[STİL: ek]] */
   `;
 
@@ -883,6 +884,9 @@
     secilenler: new Set(), // seçili hesapların norm adları (sekmeler arası ortak)
     manuelIsletme: new Set(), // elle "işletme" olarak işaretlenen norm adlar
     gunluk: [], // manuel işlem günlüğü: { zamanMs, olay, norm, kullaniciAdi, iliski, not }
+    hesapKayitlari: {}, // norm → { olay: 'tamamlandi'|'atlandi', zamanMs, not } (yalnızca yerel kayıt)
+    yerelKayitYuklendiMs: null,
+    yerelKayitHatasi: null,
     liste: {
       sekme: 'takipEtmeyenler',
       arama: '',
@@ -1456,9 +1460,11 @@
     });
     // Bağlantı: yalnızca profil sayfası. Yeni sekmede, referrer/opener olmadan.
     const baglanti = el('a', { href: profilUrl(h.norm), target: '_blank', rel: 'noopener noreferrer', text: '@' + h.kullaniciAdi });
+    const yk = durum.hesapKayitlari[h.norm];
+    const rozet = yk ? el('span', { class: 'rozet', title: 'Yalnızca yerel kayıt; Instagram\'daki gerçek durumu göstermez', text: yk.olay === 'tamamlandi' ? 'yerel: tamamlandı' : 'yerel: atlandı' }) : null;
     return el('tr', {}, [
       el('td', {}, kutu),
-      el('td', {}, [baglanti, h.kullaniciAdi.toLowerCase() !== h.norm ? el('span', { class: 'sessiz', text: ' (' + h.norm + ')' }) : null]),
+      el('td', {}, [baglanti, h.kullaniciAdi.toLowerCase() !== h.norm ? el('span', { class: 'sessiz', text: ' (' + h.norm + ')' }) : null, rozet]),
       el('td', { text: ILISKI_ETIKETLERI[h.iliski] }),
       el('td', { class: h.sonDm.durum === 'var' ? '' : 'sessiz', text: sonDmMetni(h) }),
       el('td', {}, cizIsletmeHucresi(h, yenidenCiz)),
@@ -1475,7 +1481,7 @@
     h.isletme = isletmeDurumu(h, durum.manuelIsletme);
     const tanim = LISTE_TANIMLARI.find((t) => t.ad === 'isletme');
     durum.analiz.listeler.isletme = durum.analiz.hesaplar.filter(tanim.yuklem).map((x) => x.norm);
-    // [[İŞLETME: kaydet]]
+    yerelDurumKaydet();
   }
 
   function cizIsletmeHucresi(h, yenidenCiz) {
@@ -1511,7 +1517,7 @@
       iliski: h ? h.iliski : null,
       not: not || '',
     });
-    // [[GÜNLÜK: kaydet]]
+    yerelDurumKaydet();
   }
 
   function kuyrukOlustur() {
@@ -1589,6 +1595,7 @@
     if (!oge) return;
     oge.durum = sonucDurumu;
     oge.zamanMs = Date.now();
+    durum.hesapKayitlari[oge.norm] = { olay: sonucDurumu, zamanMs: oge.zamanMs, not: oge.not };
     gunlukEkle(sonucDurumu, oge, oge.not);
     if (k.indeks >= k.ogeler.length - 1) {
       k.durum = 'bitti';
@@ -1608,6 +1615,7 @@
     k.sonrakiHazir = false;
     const oge = k.ogeler[k.indeks];
     if (profiliAcsin && oge) profiliAc(oge.norm);
+    yerelDurumKaydet();
     ciz();
   }
 
@@ -1624,7 +1632,13 @@
     const k = durum.kuyruk;
     if (!k || k.durum !== 'duraklatildi') return;
     k.durum = 'etkin';
-    if (k.geriSayim) geriSayimSurdur();
+    if (k.geriSayim) {
+      geriSayimSurdur();
+    } else if (k.beklemeGerekli) {
+      // Yerel kayıttan yüklendi ve geri sayım ortasındaydı: güvenli tarafta kalıp yeni bekleme başlat.
+      k.beklemeGerekli = false;
+      geriSayimBaslat();
+    }
     gunlukEkle('devam', null, '');
     ciz();
   }
@@ -1707,6 +1721,7 @@
         notAlani.addEventListener('input', () => {
           oge.not = notAlani.value;
         });
+        notAlani.addEventListener('change', yerelDurumKaydet);
         kart.appendChild(el('div', { class: 'satir' }, [notAlani]));
         kart.appendChild(
           el('div', { class: 'satir' }, [
@@ -1743,9 +1758,262 @@
     kap.appendChild(el('div', { class: 'tablo-kap' }, tablo));
   }
 
+  // ---------------------------------------------------------------------------
+  // Yerel kayıt (localStorage)
+  // Yalnızca bu tarayıcı profilinde, STORAGE_KEY anahtarı altında tutulur. Ağa gitmez.
+  // Saklananlar: kullanıcı adı, elle işletme etiketleri, işlem günlüğü, kuyruk ilerlemesi,
+  // hesap başına yerel kayıt (tamamlandı/atlandı/not). Arşiv dosyalarının içeriği SAKLANMAZ.
+  // ---------------------------------------------------------------------------
+
+  function yerelDurumKaydet() {
+    const k = durum.kuyruk;
+    const paket = {
+      surum: SURUM,
+      kaydedildiMs: Date.now(),
+      kullaniciAdim: durum.kullaniciAdim,
+      manuelIsletme: Array.from(durum.manuelIsletme),
+      gunluk: durum.gunluk,
+      hesapKayitlari: durum.hesapKayitlari,
+      kuyruk: k
+        ? {
+            durum: k.durum === 'etkin' ? 'duraklatildi' : k.durum, // yeniden yüklenince kullanıcı "Devam et" demeli
+            ogeler: k.ogeler,
+            indeks: k.indeks,
+            olusturmaMs: k.olusturmaMs,
+            beklemeGerekli: !!k.geriSayim, // geri sayım ortasındaysa devamda yeni bekleme başlatılır
+            sonrakiHazir: k.sonrakiHazir,
+          }
+        : null,
+    };
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(paket));
+      durum.yerelKayitHatasi = null;
+    } catch (hata) {
+      durum.yerelKayitHatasi = 'Yerel kayıt yazılamadı: ' + (hata && hata.message ? hata.message : 'bilinmeyen hata');
+    }
+  }
+
+  function yerelDurumYukle() {
+    let ham;
+    try {
+      ham = window.localStorage.getItem(STORAGE_KEY);
+    } catch (_hata) {
+      return false;
+    }
+    if (!ham) return false;
+    let paket;
+    try {
+      paket = JSON.parse(ham);
+    } catch (_hata) {
+      durum.yerelKayitHatasi = 'Yerel kayıt bozuk; yok sayıldı. "Yerel verileri temizle" ile silebilirsiniz.';
+      return false;
+    }
+    if (!nesneMi(paket)) return false;
+    if (typeof paket.kullaniciAdim === 'string') durum.kullaniciAdim = paket.kullaniciAdim;
+    if (dizimi(paket.manuelIsletme)) durum.manuelIsletme = new Set(paket.manuelIsletme.filter((x) => typeof x === 'string'));
+    if (dizimi(paket.gunluk)) durum.gunluk = paket.gunluk.filter(nesneMi);
+    if (nesneMi(paket.hesapKayitlari)) durum.hesapKayitlari = paket.hesapKayitlari;
+    if (nesneMi(paket.kuyruk) && dizimi(paket.kuyruk.ogeler)) {
+      durum.kuyruk = {
+        durum: paket.kuyruk.durum === 'etkin' ? 'duraklatildi' : paket.kuyruk.durum,
+        ogeler: paket.kuyruk.ogeler.filter(nesneMi),
+        indeks: typeof paket.kuyruk.indeks === 'number' ? paket.kuyruk.indeks : 0,
+        geriSayim: null,
+        sonrakiHazir: !!paket.kuyruk.sonrakiHazir,
+        olusturmaMs: paket.kuyruk.olusturmaMs || null,
+        beklemeGerekli: !!paket.kuyruk.beklemeGerekli,
+      };
+    }
+    durum.yerelKayitYuklendiMs = typeof paket.kaydedildiMs === 'number' ? paket.kaydedildiMs : null;
+    return true;
+  }
+
+  function yerelVerileriTemizle() {
+    const onay = window.confirm(
+      'Bu tarayıcıdaki tüm yerel kayıtlar (elle işletme etiketleri, işlem günlüğü, kuyruk ilerlemesi, notlar) silinecek. ' +
+        'İçe aktarılan dosyalar zaten saklanmıyor. Devam edilsin mi?'
+    );
+    if (!onay) return;
+    geriSayimDurdur();
+    try {
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch (_hata) {
+      // Erişilemiyorsa yapılacak bir şey yok; bellek zaten temizleniyor.
+    }
+    durum.manuelIsletme = new Set();
+    durum.gunluk = [];
+    durum.hesapKayitlari = {};
+    durum.kuyruk = null;
+    durum.yerelKayitYuklendiMs = null;
+    durum.yerelKayitHatasi = null;
+    if (durum.analiz) analiziCalistir();
+    ciz();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Dışa aktarma (JSON / CSV)
+  // Blob + URL.createObjectURL ile yalnızca tarayıcı içinde indirme bağlantısı üretir.
+  // Bu bir ağ isteği DEĞİLDİR; veri hiçbir sunucuya gitmez.
+  // ---------------------------------------------------------------------------
+
+  function dosyaIndir(ad, icerik, mime) {
+    const blob = new Blob([icerik], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = ad;
+    a.style.display = 'none';
+    golge.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function csvHucre(deger) {
+    if (deger === null || deger === undefined) return '';
+    const s = String(deger);
+    // Formül enjeksiyonuna karşı: =, +, -, @ ile başlayan hücrelerin önüne tek tırnak konur.
+    const guvenli = /^[=+\-@]/.test(s) ? "'" + s : s;
+    return /[",\n\r;]/.test(guvenli) ? '"' + guvenli.replace(/"/g, '""') + '"' : guvenli;
+  }
+
+  function csvUret(basliklar, satirlar) {
+    const satirMetinleri = [basliklar.map(csvHucre).join(',')];
+    for (const s of satirlar) satirMetinleri.push(s.map(csvHucre).join(','));
+    return '\uFEFF' + satirMetinleri.join('\r\n'); // BOM: Excel'de Türkçe karakterler için
+  }
+
+  function hesapListeleri(h) {
+    const a = durum.analiz;
+    if (!a) return [];
+    return LISTE_TANIMLARI.filter((t) => a.listeler[t.ad].includes(h.norm)).map((t) => t.ad);
+  }
+
+  function disaAktarNesnesi() {
+    const a = durum.analiz;
+    return {
+      arac: 'ig-manuel-asistan',
+      surum: SURUM,
+      olusturmaMs: Date.now(),
+      olusturma: new Date().toISOString(),
+      kullaniciAdim: durum.kullaniciAdim,
+      not: 'Bu dışa aktarım yalnızca yerel analizdir. Listeler, Instagram arşivinin alındığı anı yansıtır ve güncel olmayabilir. "Tamamlandı" kayıtları kullanıcının kendi işaretidir; araç Instagram üzerinde işlem yapmaz ve doğrulayamaz.',
+      dosyalar: durum.dosyalar.map((d) => ({ yol: d.yol, tur: d.tur, kayitSayisi: d.kayitSayisi })),
+      ozet: a ? { sayilar: a.sayilar, dm: a.dm, uyarilar: a.uyarilar, listeBoyutlari: Object.fromEntries(Object.entries(a.listeler).map(([k, v]) => [k, v.length])) } : null,
+      hesaplar: a
+        ? a.hesaplar.map((h) => ({
+            kullaniciAdi: h.kullaniciAdi,
+            norm: h.norm,
+            profilUrl: profilUrl(h.norm),
+            takipEdiyorum: h.takipEdiyorum,
+            beniTakipEdiyor: h.beniTakipEdiyor,
+            istekGonderildi: h.istekGonderildi,
+            iliski: h.iliski,
+            sonDm: h.sonDm,
+            isletme: h.isletme,
+            kaynakDosyalar: h.kaynakDosyalar,
+            listeler: hesapListeleri(h),
+            yerelKayit: durum.hesapKayitlari[h.norm] || null,
+          }))
+        : [],
+      manuelIsletme: Array.from(durum.manuelIsletme),
+      kuyruk: durum.kuyruk ? { durum: durum.kuyruk.durum, indeks: durum.kuyruk.indeks, olusturmaMs: durum.kuyruk.olusturmaMs, ogeler: durum.kuyruk.ogeler } : null,
+      gunluk: durum.gunluk,
+    };
+  }
+
+  function tarihDamgasi() {
+    return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  }
+
+  function jsonDisaAktar() {
+    dosyaIndir('ig-manuel-asistan-analiz-' + tarihDamgasi() + '.json', JSON.stringify(disaAktarNesnesi(), null, 2), 'application/json');
+  }
+
+  function hesaplarCsvDisaAktar() {
+    const a = durum.analiz;
+    if (!a) return;
+    const basliklar = ['kullanici_adi', 'profil_url', 'takip_ediyorum', 'beni_takip_ediyor', 'istek_gonderildi', 'iliski', 'son_dm_tarihi', 'son_dm_durumu', 'dm_eslesme', 'isletme_durumu', 'listeler', 'kaynak_dosyalar', 'yerel_kayit', 'yerel_kayit_zamani', 'not'];
+    const satirlar = a.hesaplar.map((h) => {
+      const yk = durum.hesapKayitlari[h.norm] || null;
+      return [
+        h.kullaniciAdi,
+        profilUrl(h.norm),
+        h.takipEdiyorum ? 'evet' : 'hayir',
+        h.beniTakipEdiyor ? 'evet' : 'hayir',
+        h.istekGonderildi ? 'evet' : 'hayir',
+        ILISKI_ETIKETLERI[h.iliski],
+        h.sonDm.zamanMs ? new Date(h.sonDm.zamanMs).toISOString() : '',
+        DM_DURUM_ETIKETLERI[h.sonDm.durum],
+        h.sonDm.eslesme || '',
+        isletmeMetni(h),
+        hesapListeleri(h).join(';'),
+        h.kaynakDosyalar.join(';'),
+        yk ? yk.olay : '',
+        yk && yk.zamanMs ? new Date(yk.zamanMs).toISOString() : '',
+        yk ? yk.not : '',
+      ];
+    });
+    dosyaIndir('ig-manuel-asistan-hesaplar-' + tarihDamgasi() + '.csv', csvUret(basliklar, satirlar), 'text/csv;charset=utf-8');
+  }
+
+  function gunlukCsvDisaAktar() {
+    const basliklar = ['zaman', 'olay', 'kullanici_adi', 'iliski', 'not'];
+    const satirlar = durum.gunluk.map((g) => [new Date(g.zamanMs).toISOString(), g.olay, g.kullaniciAdi || '', g.iliski ? ILISKI_ETIKETLERI[g.iliski] : '', g.not || '']);
+    dosyaIndir('ig-manuel-asistan-gunluk-' + tarihDamgasi() + '.csv', csvUret(basliklar, satirlar), 'text/csv;charset=utf-8');
+  }
+
   function cizKayit(kap) {
     kap.appendChild(el('h2', { text: 'Kayıt ve dışa aktarma' }));
-    kap.appendChild(el('p', { class: 'sessiz', text: 'Kayıt bölümü henüz eklenmedi.' }));
+
+    const kayitSayisi = Object.keys(durum.hesapKayitlari).length;
+    const tamamlanan = Object.values(durum.hesapKayitlari).filter((k) => k.olay === 'tamamlandi').length;
+    const atlanan = Object.values(durum.hesapKayitlari).filter((k) => k.olay === 'atlandi').length;
+    const kalan = durum.kuyruk ? durum.kuyruk.ogeler.filter((o) => o.durum === 'bekliyor').length : 0;
+
+    kap.appendChild(
+      el('div', { class: 'kart' }, [
+        el('h3', { text: 'Yerel durum' }),
+        el('p', { text: 'Tamamlandı olarak işaretlenen: ' + tamamlanan + ' · Atlanan: ' + atlanan + ' · Kuyrukta kalan: ' + kalan + ' · Elle işletme etiketi: ' + durum.manuelIsletme.size + ' · Günlük kaydı: ' + durum.gunluk.length }),
+        el('p', { class: 'sessiz', text: 'Bu veriler tarayıcı profilinizin localStorage alanında "' + STORAGE_KEY + '" anahtarı altında tutulur. Tarayıcı profilinizin dışına çıkmaz; başka cihaz veya sunucuyla paylaşılmaz. Arşiv dosyalarının içeriği saklanmaz.' }),
+        durum.yerelKayitYuklendiMs ? el('p', { class: 'sessiz', text: 'Son kayıt: ' + new Date(durum.yerelKayitYuklendiMs).toLocaleString('tr-TR') }) : null,
+        durum.yerelKayitHatasi ? el('p', { class: 'hata', text: durum.yerelKayitHatasi }) : null,
+        el('div', { class: 'satir' }, [el('button', { class: 'tehlike', text: 'Yerel verileri temizle', disabled: kayitSayisi === 0 && durum.gunluk.length === 0 && durum.manuelIsletme.size === 0 && !durum.kuyruk, onclick: yerelVerileriTemizle })]),
+      ])
+    );
+
+    kap.appendChild(
+      el('div', { class: 'kart' }, [
+        el('h3', { text: 'Dışa aktar' }),
+        el('p', { class: 'sessiz', text: 'Dosyalar tarayıcı içinde üretilir ve doğrudan indirilir; hiçbir sunucuya gönderilmez. Dışa aktarılan listeler arşiv tarihine göredir ve güncel olmayabilir.' }),
+        el('div', { class: 'satir' }, [
+          el('button', { text: 'Analiz + günlük (JSON)', onclick: jsonDisaAktar }),
+          el('button', { text: 'Hesaplar (CSV)', disabled: !durum.analiz, onclick: hesaplarCsvDisaAktar }),
+          el('button', { text: 'İşlem günlüğü (CSV)', disabled: durum.gunluk.length === 0, onclick: gunlukCsvDisaAktar }),
+        ]),
+      ])
+    );
+
+    kap.appendChild(el('h3', { text: 'İşlem günlüğü (son 100)' }));
+    if (durum.gunluk.length === 0) {
+      kap.appendChild(el('p', { class: 'sessiz', text: 'Henüz kayıt yok.' }));
+      return;
+    }
+    const OLAY_ETIKETLERI = { kuyrukOlusturuldu: 'Kuyruk oluşturuldu', tamamlandi: 'Tamamlandı (yerel)', atlandi: 'Atlandı', duraklatildi: 'Duraklatıldı', devam: 'Devam edildi', iptal: 'İptal edildi', kuyrukBitti: 'Kuyruk bitti' };
+    const son = durum.gunluk.slice(-100).reverse();
+    kap.appendChild(
+      el('div', { class: 'tablo-kap' }, el('table', { class: 'tablo' }, [
+        el('thead', {}, el('tr', {}, ['Zaman', 'Olay', 'Hesap', 'Not'].map((b) => el('th', { text: b })))),
+        el('tbody', {}, son.map((g) =>
+          el('tr', {}, [
+            el('td', { text: new Date(g.zamanMs).toLocaleString('tr-TR') }),
+            el('td', { text: OLAY_ETIKETLERI[g.olay] || g.olay }),
+            el('td', { text: g.kullaniciAdi ? '@' + g.kullaniciAdi : '–' }),
+            el('td', { class: 'sessiz', text: g.not || '' }),
+          ])
+        )),
+      ]))
+    );
   }
 
   function cizBilgi(kap) {
@@ -1767,6 +2035,10 @@
 
   // Denetim ve test için salt okunur API (sayfa değişkenlerine yazmaz, yalnızca bu adı tanımlar).
   window.igManuelAsistan = API;
+
+  // Önceki oturumdan yerel kayıt varsa yükle (kuyruk "duraklatıldı" olarak gelir).
+  yerelDurumYukle();
+  if (durum.kuyruk && (durum.kuyruk.durum === 'duraklatildi')) durum.goruntu = 'kuyruk';
 
   ciz();
   console.info('[ig-manuel-asistan] v' + SURUM + ' yüklendi. ' + UYARI_OTOMATIK_YOK);
