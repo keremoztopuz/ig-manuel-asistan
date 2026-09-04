@@ -382,7 +382,151 @@
     return 'hicbiri';
   }
 
-  // [[BÖLÜM: dm]]
+  // ===========================================================================
+  // 5. Direkt mesaj (DM) çözümleme
+  //
+  // Instagram, konuşmaları messages/inbox/<slug>/message_N.json olarak dışa aktarır.
+  // <slug> genellikle karşı tarafın kullanıcı adı + "_" + uzun sayısal kimliktir
+  // (ör. "ayse_17842123456789012"). Katılımcı adları ise görünen ad'dır, kullanıcı adı değil.
+  // Bu yüzden eşleştirme iki aşamalıdır: önce klasör slug'ı (güvenilir), sonra görünen ad'ın
+  // kullanıcı adıyla birebir eşleşmesi (daha zayıf; ayrıca işaretlenir).
+  // ===========================================================================
+
+  // "ayse_17842123456789012" → "ayse". Sondaki uzun sayısal kimlik (8+ hane) atılır.
+  function dmSlugundanKullaniciAdi(slug) {
+    if (typeof slug !== 'string') return null;
+    const s = slug.trim();
+    if (!s) return null;
+    return normalizeKullaniciAdi(s.replace(/_\d{8,}$/, ''));
+  }
+
+  // Dosya yolundan ya da thread_path alanından konuşma slug'ını bulur.
+  function dmSlugBul(yol, json) {
+    const y = yolNormalize(yol);
+    const parcalar = y.split('/');
+    const i = parcalar.lastIndexOf('inbox');
+    if (i >= 0 && parcalar.length > i + 1) return parcalar[i + 1];
+    if (nesneMi(json) && typeof json.thread_path === 'string') {
+      const tp = yolNormalize(json.thread_path).split('/');
+      return tp[tp.length - 1] || null;
+    }
+    // Yol yalnızca dosya adı ise (çoklu dosya seçimi) slug bilinmez.
+    return null;
+  }
+
+  function dmSonZaman(messages) {
+    let son = null;
+    if (!dizimi(messages)) return null;
+    for (const m of messages) {
+      if (nesneMi(m) && typeof m.timestamp_ms === 'number' && (son === null || m.timestamp_ms > son)) son = m.timestamp_ms;
+    }
+    return son;
+  }
+
+  // Tüm DM dosyalarını konuşma bazında gruplayıp hesaplara eşler.
+  // Dönüş: { arsivVar, konusmaSayisi, birebirSayisi, grupSayisi, eslesmeyenBirebir, eslesmeler: Map<norm, {zamanMs, kaynak, eslesme}> }
+  function dmKonusmalariniIsle(dosyalar, hesaplar, kullaniciAdimNorm, grupDahil) {
+    const dmDosyalari = dosyalar.filter((d) => d.tur === 'dm');
+    const sonuc = {
+      arsivVar: dmDosyalari.length > 0,
+      konusmaSayisi: 0,
+      birebirSayisi: 0,
+      grupSayisi: 0,
+      eslesmeyenBirebir: 0,
+      eslesmeler: new Map(),
+    };
+    if (!sonuc.arsivVar) return sonuc;
+
+    // Aynı konuşmanın parçalarını (message_1, message_2, …) birleştir.
+    const konusmalar = new Map(); // anahtar: slug ya da yol
+    for (const d of dmDosyalari) {
+      const slug = dmSlugBul(d.yol, d.json) || ('__yol__' + yolNormalize(d.yol));
+      let k = konusmalar.get(slug);
+      if (!k) {
+        k = { slug, katilimcilar: [], sonMs: null, kaynaklar: [] };
+        konusmalar.set(slug, k);
+      }
+      if (dizimi(d.json.participants)) {
+        for (const p of d.json.participants) {
+          const ad = nesneMi(p) && typeof p.name === 'string' ? mojibakeDuzelt(p.name) : null;
+          if (ad && !k.katilimcilar.includes(ad)) k.katilimcilar.push(ad);
+        }
+      }
+      const son = dmSonZaman(d.json.messages);
+      if (son !== null && (k.sonMs === null || son > k.sonMs)) k.sonMs = son;
+      k.kaynaklar.push(d.yol);
+    }
+
+    function eslestir(norm, k, eslesme) {
+      if (!hesaplar.has(norm)) return false;
+      const eski = sonuc.eslesmeler.get(norm);
+      if (!eski || (k.sonMs !== null && (eski.zamanMs === null || k.sonMs > eski.zamanMs))) {
+        sonuc.eslesmeler.set(norm, { zamanMs: k.sonMs, kaynak: k.kaynaklar[0], eslesme });
+      }
+      return true;
+    }
+
+    for (const k of konusmalar.values()) {
+      sonuc.konusmaSayisi++;
+      const birebir = k.katilimcilar.length <= 2;
+      if (!birebir) {
+        sonuc.grupSayisi++;
+        if (!grupDahil) continue;
+        // Grup konuşması yalnızca isteğe bağlı olarak ve görünen ad eşleşmesiyle sayılır.
+        for (const ad of k.katilimcilar) {
+          const n = normalizeKullaniciAdi(ad);
+          if (n && n !== kullaniciAdimNorm) eslestir(n, k, 'grup-ad');
+        }
+        continue;
+      }
+      sonuc.birebirSayisi++;
+      let eslesti = false;
+      if (!k.slug.startsWith('__yol__')) {
+        const n = dmSlugundanKullaniciAdi(k.slug);
+        if (n && n !== kullaniciAdimNorm) eslesti = eslestir(n, k, 'slug');
+      }
+      if (!eslesti) {
+        for (const ad of k.katilimcilar) {
+          const n = normalizeKullaniciAdi(ad);
+          if (n && n !== kullaniciAdimNorm && eslestir(n, k, 'ad')) {
+            eslesti = true;
+            break;
+          }
+        }
+      }
+      if (!eslesti) sonuc.eslesmeyenBirebir++;
+    }
+    return sonuc;
+  }
+
+  // Her hesabın sonDm alanını doldurur. Durumlar:
+  //   'var'      → son 365 gün içinde birebir mesaj var
+  //   'eski'     → son mesaj 365 günden eski
+  //   'yok'      → içe aktarılan dosyalarda bu hesapla birebir konuşma bulunamadı
+  //   'arsivYok' → hiç DM dosyası yüklenmedi (arşiv eksik ya da hiç seçilmedi)
+  function sonDmUygula(hesaplar, dmSonuc, simdiMs) {
+    const esikMs = simdiMs - DM_ESIK_GUN * GUN_MS;
+    for (const h of hesaplar.values()) {
+      if (!dmSonuc.arsivVar) {
+        h.sonDm = { durum: 'arsivYok', zamanMs: null, kaynak: null, eslesme: null };
+        continue;
+      }
+      const e = dmSonuc.eslesmeler.get(h.norm);
+      if (!e) {
+        h.sonDm = { durum: 'yok', zamanMs: null, kaynak: null, eslesme: null };
+        continue;
+      }
+      const durumu = e.zamanMs !== null && e.zamanMs >= esikMs ? 'var' : 'eski';
+      h.sonDm = { durum: durumu, zamanMs: e.zamanMs, kaynak: e.kaynak, eslesme: e.eslesme };
+    }
+  }
+
+  const DM_DURUM_ETIKETLERI = {
+    var: 'Son 1 yıl içinde DM var',
+    eski: 'Son DM 365 günden eski',
+    yok: 'İçe aktarılan dosyalarda birebir konuşma bulunamadı',
+    arsivYok: 'Mesaj arşivi yüklenmedi / eksik',
+  };
 
   // ---------------------------------------------------------------------------
   // Liste tanımları: her liste, hesap için bir yüklem (predicate).
@@ -448,7 +592,8 @@
     const manuelIsletme = s.manuelIsletme instanceof Set ? s.manuelIsletme : new Set();
 
     const { hesaplar, sayilar } = hesaplariBirlestir(dosyalar, kullaniciAdimNorm);
-    // [[ANALİZ: dm uygulama]]
+    const dm = dmKonusmalariniIsle(dosyalar, hesaplar, kullaniciAdimNorm, !!s.grupDahil);
+    sonDmUygula(hesaplar, dm, simdiMs);
 
     const dizi = [];
     for (const h of hesaplar.values()) {
@@ -464,9 +609,25 @@
     const uyarilar = [];
     if (sayilar.gecersizKayit > 0) uyarilar.push(sayilar.gecersizKayit + ' kayıt kullanıcı adı çıkarılamadığı için atlandı.');
     if (sayilar.kendisiAtlandi > 0) uyarilar.push('Kendi kullanıcı adınız listelerden çıkarıldı.');
-    // [[ANALİZ: dm uyarıları]]
+    if (!dm.arsivVar) {
+      uyarilar.push('Mesaj arşivi yüklenmedi; DM sekmesindeki tüm hesaplar "arşiv eksik" durumundadır. Bu, hiç yazışılmadığı anlamına gelmez.');
+    } else {
+      if (dm.eslesmeyenBirebir > 0) {
+        uyarilar.push(dm.eslesmeyenBirebir + ' birebir konuşma hiçbir hesapla eşleştirilemedi (silinmiş hesap, ad değişikliği veya slug farkı olabilir).');
+      }
+      if (dm.grupSayisi > 0 && !s.grupDahil) uyarilar.push(dm.grupSayisi + ' grup konuşması varsayılan olarak dışarıda bırakıldı.');
+    }
 
-    return { hesaplar: dizi, listeler, sayilar, uyarilar, simdiMs, kullaniciAdimNorm, dm: null };
+    const dmOzet = {
+      arsivVar: dm.arsivVar,
+      konusmaSayisi: dm.konusmaSayisi,
+      birebirSayisi: dm.birebirSayisi,
+      grupSayisi: dm.grupSayisi,
+      eslesmeyenBirebir: dm.eslesmeyenBirebir,
+      eslesenHesap: dm.eslesmeler.size,
+    };
+
+    return { hesaplar: dizi, listeler, sayilar, uyarilar, simdiMs, kullaniciAdimNorm, dm: dmOzet };
   }
 
   // ===========================================================================
@@ -494,6 +655,9 @@
     ILISKI_ETIKETLERI,
     LISTE_TANIMLARI,
     analizEt,
+    dmSlugundanKullaniciAdi,
+    dmKonusmalariniIsle,
+    DM_DURUM_ETIKETLERI,
     // [[API: fonksiyonlar]]
   });
 
@@ -678,6 +842,7 @@
     kullaniciAdim: '',
     kullaniciAdiOnaylandi: false,
     analiz: null, // analizEt() sonucu
+    grupDahil: false, // DM hesabında grup konuşmaları da sayılsın mı (varsayılan: hayır)
     // [[DURUM: alanlar]]
   };
 
@@ -687,6 +852,7 @@
     durum.analiz = analizEt(durum.dosyalar, {
       kullaniciAdim: durum.kullaniciAdim,
       simdiMs: Date.now(),
+      grupDahil: durum.grupDahil,
       // [[ANALİZ ÇAĞRISI: seçenekler]]
     });
   }
