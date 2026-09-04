@@ -197,10 +197,12 @@
       }
       // DM iş parçacığı
       if (dmDosyasiMi(json)) {
-        if (y.includes('message_requests')) {
+        // Çoklu dosya seçiminde klasör yolu gelmez; o zaman dosyanın kendi thread_path alanına bakılır.
+        const threadPath = typeof json.thread_path === 'string' ? yolNormalize(json.thread_path) : '';
+        if (y.includes('message_requests') || threadPath.startsWith('message_requests/')) {
           return { tur: 'iliskiDiger', kayitlar: null, not: 'Mesaj isteği klasörü; gelen kutusu değil, kullanılmaz' };
         }
-        const gelenKutusu = y.includes('/inbox/') || y.startsWith('inbox/');
+        const gelenKutusu = y.includes('/inbox/') || y.startsWith('inbox/') || threadPath.startsWith('inbox/');
         return { tur: 'dm', kayitlar: json.messages, not: gelenKutusu ? 'inbox altında' : 'inbox yolu doğrulanamadı, yapıya göre tanındı' };
       }
       // Kişisel bilgi

@@ -71,6 +71,11 @@ test('veri seti algılama: yalnızca dosya adı ile (klasör yolu yok)', () => {
   // Gelen istekler asla "gönderilen" sayılmaz
   assert.equal(A.veriSetiTuruBul('x.json', { relationships_follow_requests_received: [kayit] }).tur, 'istekGelen');
   assert.equal(A.veriSetiTuruBul('x.json', { rastgele: 1 }).tur, 'bilinmeyen');
+  // Klasör yolu yokken thread_path alanı gelen kutusu / mesaj isteği ayrımını sağlar
+  const dm = (tp) => ({ participants: [{ name: 'a' }, { name: 'b' }], messages: [{ sender_name: 'a', timestamp_ms: 1 }], thread_path: tp });
+  assert.equal(A.veriSetiTuruBul('message_1.json', dm('inbox/a_17842000000000001')).tur, 'dm');
+  assert.equal(A.veriSetiTuruBul('message_1.json', dm('inbox/a_17842000000000001')).not, 'inbox altında');
+  assert.equal(A.veriSetiTuruBul('message_1.json', dm('message_requests/a_17842000000000001')).tur, 'iliskiDiger');
   assert.equal(A.veriSetiTuruBul('x.json', 'metin').tur, 'bilinmeyen');
 });
 
