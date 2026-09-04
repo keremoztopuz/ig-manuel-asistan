@@ -74,6 +74,32 @@
     }
   }
 
+  // [min, max] aralığında kriptografik rastgele tam sayı (crypto.getRandomValues, modulo yanlılığı yok).
+  function rastgeleSaniye(min, max) {
+    const aralik = max - min + 1;
+    const tampon = new Uint32Array(1);
+    const kripto = (typeof globalThis !== 'undefined' && globalThis.crypto) || null;
+    if (!kripto || typeof kripto.getRandomValues !== 'function') {
+      throw new Error('crypto.getRandomValues kullanılamıyor');
+    }
+    const ustSinir = Math.floor(0x100000000 / aralik) * aralik;
+    let deger;
+    do {
+      kripto.getRandomValues(tampon);
+      deger = tampon[0];
+    } while (deger >= ustSinir);
+    return min + (deger % aralik);
+  }
+
+  // Her ilişki türü için kullanıcının KENDİSİNİN yapabileceği manuel işlem metni.
+  const MANUEL_TALIMATLAR = {
+    takipEdiyorumBeniEtmiyor: 'Profili aç ve Instagram arayüzünden manuel olarak takipten çık.',
+    beniTakipEdiyorBenEtmiyorum: 'Instagram arayüzünden takipçiyi manuel olarak kaldır.',
+    karsilikli: 'Profili aç; manuel olarak takipten çık. İstersen takipçiler listesinden bu kişiyi ayrıca manuel kaldır.',
+    istekBekliyor: 'Profili aç ve bekleyen takip isteğini Instagram arayüzünden manuel iptal et.',
+    hicbiri: 'Arşivde bu hesapla ilişki bulunmadı; önerilen manuel işlem yok.',
+  };
+
   // Dosya yolunu karşılaştırma için sadeleştirir: ters bölü → bölü, küçük harf.
   function yolNormalize(yol) {
     return String(yol || '').replace(/\\/g, '/').toLowerCase();
@@ -658,6 +684,8 @@
     dmSlugundanKullaniciAdi,
     dmKonusmalariniIsle,
     DM_DURUM_ETIKETLERI,
+    rastgeleSaniye,
+    MANUEL_TALIMATLAR,
     // [[API: fonksiyonlar]]
   });
 
@@ -829,6 +857,9 @@
     .alt-sekmeler button.etkin { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
     input[type="search"] { min-width: 160px; }
     label.satir { cursor: pointer; }
+    .kart.vurgulu { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
+    tr.vurgulu td { background: var(--bg2); }
+    textarea { width: 100%; resize: vertical; }
     /* [[STİL: ek]] */
   `;
 
@@ -851,6 +882,7 @@
     grupDahil: false, // DM hesabında grup konuşmaları da sayılsın mı (varsayılan: hayır)
     secilenler: new Set(), // seçili hesapların norm adları (sekmeler arası ortak)
     manuelIsletme: new Set(), // elle "işletme" olarak işaretlenen norm adlar
+    gunluk: [], // manuel işlem günlüğü: { zamanMs, olay, norm, kullaniciAdi, iliski, not }
     liste: {
       sekme: 'takipEtmeyenler',
       arama: '',
@@ -963,6 +995,7 @@
     if (kuyrukEtkinMi()) {
       const onay = window.confirm('Etkin bir kuyruk var. Veri sıfırlanırsa kuyruk da iptal edilir. Devam edilsin mi?');
       if (!onay) return;
+      geriSayimDurdur();
       durum.kuyruk = null;
     }
     durum.dosyalar = [];
@@ -1011,6 +1044,7 @@
       );
       if (!onay) return;
     }
+    geriSayimDurdur();
     host.remove();
   }
 
@@ -1388,6 +1422,9 @@
         durum.secilenler.clear();
         cizGovde();
       } }));
+      secimSatiri.appendChild(el('button', { class: 'kucuk birincil', text: 'Seçilenlerden manuel kuyruk oluştur (' + durum.secilenler.size + ')', disabled: durum.secilenler.size === 0, onclick: () => {
+        kuyrukOlustur();
+      } }));
       // [[LİSTE: seçim ek]]
 
       if (gorunen.length === 0) {
@@ -1458,9 +1495,252 @@
     return [el('span', { class: h.isletme.durum === 'dogrulanamaz' ? 'sessiz' : '', text: isletmeMetni(h) }), el('br'), dugme];
   }
 
+  // ---------------------------------------------------------------------------
+  // Manuel işlem kuyruğu
+  // Kuyruk, hiçbir Instagram işlemi YAPMAZ. Yalnızca sırayla hangi hesap için hangi manuel
+  // işlemi yapmayı seçebileceğinizi gösterir ve istediğinizde profili yeni sekmede açar.
+  // "Tamamlandı" ve "Atla" yalnızca yerel kayıttır; geri sayım sırasında hiçbir şey yapılmaz.
+  // ---------------------------------------------------------------------------
+
+  function gunlukEkle(olay, h, not) {
+    durum.gunluk.push({
+      zamanMs: Date.now(),
+      olay,
+      norm: h ? h.norm : null,
+      kullaniciAdi: h ? h.kullaniciAdi : null,
+      iliski: h ? h.iliski : null,
+      not: not || '',
+    });
+    // [[GÜNLÜK: kaydet]]
+  }
+
+  function kuyrukOlustur() {
+    if (!durum.analiz || durum.secilenler.size === 0) return;
+    if (kuyrukEtkinMi()) {
+      const onay = window.confirm('Zaten etkin bir kuyruk var. Yeni kuyruk oluşturulursa eskisi iptal edilir. Devam edilsin mi?');
+      if (!onay) return;
+      kuyrukIptal(true);
+    }
+    const haritasi = new Map(durum.analiz.hesaplar.map((h) => [h.norm, h]));
+    const ogeler = [];
+    for (const norm of durum.secilenler) {
+      const h = haritasi.get(norm);
+      if (!h) continue;
+      ogeler.push({ norm: h.norm, kullaniciAdi: h.kullaniciAdi, iliski: h.iliski, talimat: MANUEL_TALIMATLAR[h.iliski], durum: 'bekliyor', zamanMs: null, not: '' });
+    }
+    durum.kuyruk = {
+      durum: 'etkin', // etkin | duraklatildi | bitti | iptal
+      ogeler,
+      indeks: 0,
+      geriSayim: null, // { kalanMs, sonTikMs, zamanlayici }
+      sonrakiHazir: false, // geri sayım bitti, "Sıradaki profili aç" etkin
+      olusturmaMs: Date.now(),
+    };
+    gunlukEkle('kuyrukOlusturuldu', null, ogeler.length + ' hesap');
+    durum.goruntu = 'kuyruk';
+    ciz();
+  }
+
+  function geriSayimDurdur() {
+    const k = durum.kuyruk;
+    if (k && k.geriSayim && k.geriSayim.zamanlayici) {
+      clearInterval(k.geriSayim.zamanlayici);
+      k.geriSayim.zamanlayici = null;
+    }
+  }
+
+  // Geri sayım: crypto ile 10–15 sn arası. Bu süre boyunca hiçbir işlem yapılmaz;
+  // yalnızca kalan saniye gösterilir ve sıradaki profil düğmesi pasif kalır.
+  function geriSayimBaslat() {
+    const k = durum.kuyruk;
+    geriSayimDurdur();
+    const sn = rastgeleSaniye(BEKLEME_MIN_SN, BEKLEME_MAX_SN);
+    k.geriSayim = { toplamSn: sn, kalanMs: sn * 1000, sonTikMs: Date.now(), zamanlayici: null };
+    k.sonrakiHazir = false;
+    geriSayimSurdur();
+  }
+
+  function geriSayimSurdur() {
+    const k = durum.kuyruk;
+    if (!k || !k.geriSayim) return;
+    k.geriSayim.sonTikMs = Date.now();
+    k.geriSayim.zamanlayici = setInterval(() => {
+      const g = k.geriSayim;
+      if (!g) return;
+      const simdi = Date.now();
+      g.kalanMs -= simdi - g.sonTikMs;
+      g.sonTikMs = simdi;
+      if (g.kalanMs <= 0) {
+        geriSayimDurdur();
+        k.geriSayim = null;
+        k.sonrakiHazir = true;
+        ciz();
+        return;
+      }
+      const hedef = golge.querySelector('[data-geri-sayim]');
+      if (hedef) hedef.textContent = String(Math.ceil(g.kalanMs / 1000));
+    }, 200);
+  }
+
+  function kuyrukOgesiniKapat(sonucDurumu) {
+    const k = durum.kuyruk;
+    if (!k || k.durum !== 'etkin' || k.geriSayim || k.sonrakiHazir) return;
+    const oge = k.ogeler[k.indeks];
+    if (!oge) return;
+    oge.durum = sonucDurumu;
+    oge.zamanMs = Date.now();
+    gunlukEkle(sonucDurumu, oge, oge.not);
+    if (k.indeks >= k.ogeler.length - 1) {
+      k.durum = 'bitti';
+      gunlukEkle('kuyrukBitti', null, '');
+      ciz();
+      return;
+    }
+    geriSayimBaslat();
+    ciz();
+  }
+
+  // Yalnızca kullanıcı tıkladığında sıradaki hesaba geçer; istenirse profilini açar.
+  function siradakineGec(profiliAcsin) {
+    const k = durum.kuyruk;
+    if (!k || k.durum !== 'etkin' || !k.sonrakiHazir) return;
+    k.indeks++;
+    k.sonrakiHazir = false;
+    const oge = k.ogeler[k.indeks];
+    if (profiliAcsin && oge) profiliAc(oge.norm);
+    ciz();
+  }
+
+  function kuyrukDuraklat() {
+    const k = durum.kuyruk;
+    if (!k || k.durum !== 'etkin') return;
+    k.durum = 'duraklatildi';
+    geriSayimDurdur();
+    gunlukEkle('duraklatildi', null, '');
+    ciz();
+  }
+
+  function kuyrukDevam() {
+    const k = durum.kuyruk;
+    if (!k || k.durum !== 'duraklatildi') return;
+    k.durum = 'etkin';
+    if (k.geriSayim) geriSayimSurdur();
+    gunlukEkle('devam', null, '');
+    ciz();
+  }
+
+  function kuyrukIptal(sessiz) {
+    const k = durum.kuyruk;
+    if (!k) return;
+    if (!sessiz) {
+      const onay = window.confirm('Kuyruk iptal edilsin mi? Tamamlanan/atlanan kayıtlar korunur; kalanlar "bekliyor" olarak kalır.');
+      if (!onay) return;
+    }
+    geriSayimDurdur();
+    k.geriSayim = null;
+    k.durum = 'iptal';
+    gunlukEkle('iptal', null, '');
+    ciz();
+  }
+
   function cizKuyruk(kap) {
     kap.appendChild(el('h2', { text: 'Manuel işlem kuyruğu' }));
-    kap.appendChild(el('p', { class: 'sessiz', text: 'Kuyruk bölümü henüz eklenmedi.' }));
+    kap.appendChild(el('p', { class: 'sessiz', text: 'Bu kuyrukta toplu işlem düğmesi yoktur. Her adımda profili siz açar, işlemi Instagram arayüzünden siz yaparsınız. ' + UYARI_DOGRULAMA_YOK }));
+
+    const k = durum.kuyruk;
+    if (!k) {
+      kap.appendChild(el('p', { class: 'sessiz', text: 'Henüz kuyruk yok. Listeler sekmesinde hesap seçip "Seçilenlerden manuel kuyruk oluştur" düğmesine basın.' }));
+      return;
+    }
+
+    const tamamlanan = k.ogeler.filter((o) => o.durum === 'tamamlandi').length;
+    const atlanan = k.ogeler.filter((o) => o.durum === 'atlandi').length;
+    const kalan = k.ogeler.filter((o) => o.durum === 'bekliyor').length;
+    const durumMetni = { etkin: 'Etkin', duraklatildi: 'Duraklatıldı', bitti: 'Tamamlandı', iptal: 'İptal edildi' }[k.durum];
+
+    kap.appendChild(
+      el('div', { class: 'kart' }, [
+        el('div', { class: 'satir' }, [
+          el('strong', { text: 'Durum: ' + durumMetni }),
+          el('span', { class: 'sessiz', text: '· ' + k.ogeler.length + ' hesap · ' + tamamlanan + ' tamamlandı · ' + atlanan + ' atlandı · ' + kalan + ' kaldı' }),
+        ]),
+        el('div', { class: 'satir' }, [
+          el('button', { text: 'Kuyruğu duraklat', disabled: k.durum !== 'etkin', onclick: kuyrukDuraklat }),
+          el('button', { text: 'Devam et', disabled: k.durum !== 'duraklatildi', onclick: kuyrukDevam }),
+          el('button', { class: 'tehlike', text: 'Kuyruğu iptal et', disabled: k.durum === 'bitti' || k.durum === 'iptal', onclick: () => kuyrukIptal(false) }),
+        ]),
+      ])
+    );
+
+    const oge = k.ogeler[k.indeks];
+    if ((k.durum === 'etkin' || k.durum === 'duraklatildi') && oge) {
+      const kart = el('div', { class: 'kart vurgulu' });
+      kart.appendChild(el('h3', { text: 'Sıradaki (' + (k.indeks + 1) + '/' + k.ogeler.length + '): @' + oge.kullaniciAdi }));
+      kart.appendChild(el('p', {}, [el('strong', { text: ILISKI_ETIKETLERI[oge.iliski] }), ' — ', oge.talimat]));
+
+      const islemAcik = k.durum === 'etkin' && !k.geriSayim && !k.sonrakiHazir;
+
+      if (k.geriSayim) {
+        kart.appendChild(
+          el('p', {}, [
+            'Bekleme: ',
+            el('strong', { 'data-geri-sayim': '1', text: String(Math.ceil(k.geriSayim.kalanMs / 1000)) }),
+            ' sn kaldı (' + k.geriSayim.toplamSn + ' sn, rastgele). Bu sürede hiçbir işlem yapılmaz; sıradaki profil düğmesi bekleme bitince etkinleşir.',
+            k.durum === 'duraklatildi' ? el('span', { class: 'sessiz', text: ' (duraklatıldı)' }) : null,
+          ])
+        );
+      }
+
+      if (k.sonrakiHazir) {
+        kart.appendChild(el('p', { class: 'basarili', text: 'Bekleme bitti. Hazır olduğunuzda sıradaki profili açabilirsiniz.' }));
+        kart.appendChild(
+          el('div', { class: 'satir' }, [
+            el('button', { class: 'birincil', text: 'Sıradaki profili aç', disabled: k.durum !== 'etkin', onclick: () => siradakineGec(true) }),
+            el('button', { class: 'kucuk', text: 'Sıradakine geç (profili açmadan)', disabled: k.durum !== 'etkin', onclick: () => siradakineGec(false) }),
+          ])
+        );
+        // Geri sayım sonrası kart, kapanan öğeyi değil bir sonrakini bekliyor; bu yüzden
+        // tamamlandı/atla düğmeleri burada gösterilmez.
+      } else {
+        const notAlani = el('textarea', { rows: '2', placeholder: 'Not (isteğe bağlı, yalnızca yerel kayıt)', disabled: !islemAcik });
+        notAlani.value = oge.not;
+        notAlani.addEventListener('input', () => {
+          oge.not = notAlani.value;
+        });
+        kart.appendChild(el('div', { class: 'satir' }, [notAlani]));
+        kart.appendChild(
+          el('div', { class: 'satir' }, [
+            el('button', { text: 'Profili aç', disabled: !islemAcik, onclick: () => profiliAc(oge.norm) }),
+            el('button', { class: 'birincil', text: 'Tamamlandı olarak işaretle', disabled: !islemAcik, onclick: () => kuyrukOgesiniKapat('tamamlandi') }),
+            el('button', { text: 'Atla', disabled: !islemAcik, onclick: () => kuyrukOgesiniKapat('atlandi') }),
+          ])
+        );
+        kart.appendChild(el('p', { class: 'sessiz', text: '"Tamamlandı" yalnızca yerel bir kayıttır; araç işlemi doğrulayamaz. İşaretledikten sonra 10–15 sn rastgele bekleme başlar.' }));
+      }
+      kap.appendChild(kart);
+    }
+
+    if (k.durum === 'bitti') kap.appendChild(el('p', { class: 'basarili', text: 'Kuyruk tamamlandı. Kayıt / Dışa aktar sekmesinden günlüğü indirebilirsiniz.' }));
+    if (k.durum === 'iptal') kap.appendChild(el('p', { class: 'sessiz', text: 'Kuyruk iptal edildi. Kalan hesaplar "bekliyor" olarak kayıtlı.' }));
+
+    // Tüm öğeler
+    kap.appendChild(el('h3', { text: 'Kuyruk öğeleri' }));
+    const durumEtiket = { bekliyor: 'Bekliyor', tamamlandi: 'Tamamlandı (yerel kayıt)', atlandi: 'Atlandı' };
+    const tablo = el('table', { class: 'tablo' }, [
+      el('thead', {}, el('tr', {}, ['#', 'Kullanıcı adı', 'Manuel işlem', 'Durum', 'Zaman', 'Not', ''].map((b) => el('th', { text: b })))),
+      el('tbody', {}, k.ogeler.map((o, i) =>
+        el('tr', { class: i === k.indeks && (k.durum === 'etkin' || k.durum === 'duraklatildi') ? 'vurgulu' : '' }, [
+          el('td', { text: String(i + 1) }),
+          el('td', {}, el('a', { href: profilUrl(o.norm), target: '_blank', rel: 'noopener noreferrer', text: '@' + o.kullaniciAdi })),
+          el('td', { class: 'sessiz', text: o.talimat }),
+          el('td', { text: durumEtiket[o.durum] }),
+          el('td', { text: o.zamanMs ? new Date(o.zamanMs).toLocaleString('tr-TR') : '–' }),
+          el('td', { class: 'sessiz', text: o.not }),
+          el('td', {}, el('button', { class: 'kucuk', text: 'Profili aç', onclick: () => profiliAc(o.norm) })),
+        ])
+      )),
+    ]);
+    kap.appendChild(el('div', { class: 'tablo-kap' }, tablo));
   }
 
   function cizKayit(kap) {
