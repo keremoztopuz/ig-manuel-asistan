@@ -234,7 +234,240 @@
     return { sayim, eksikler };
   }
 
-  // [[BÖLÜM: analiz]]
+  // ===========================================================================
+  // 4. Kullanıcı adı normalizasyonu ve hesap modeli
+  // ===========================================================================
+
+  // Profil URL'sinden kullanıcı adı çıkarır; profil olmayan yollar (p/, reel/, explore/) null döner.
+  const PROFIL_OLMAYAN_YOLLAR = new Set(['p', 'reel', 'reels', 'explore', 'stories', 'accounts', 'direct', '_u', 'tv']);
+  function kullaniciAdiUrldenCikar(href) {
+    if (typeof href !== 'string') return null;
+    const m = href.trim().match(/^(?:https?:\/\/)?(?:www\.)?instagram\.com\/([^/?#]+)\/?(?:[?#].*)?$/i);
+    if (!m) return null;
+    const parca = m[1].replace(/^@/, '');
+    if (PROFIL_OLMAYAN_YOLLAR.has(parca.toLowerCase())) return null;
+    return parca;
+  }
+
+  // Karşılaştırma için: boşluk kırp, baştaki @ kaldır, URL ise kullanıcı adını çıkar, küçük harfe çevir.
+  // Görüntüleme için orijinal değer ayrıca saklanır (bkz. iliskiKaydiniCoz).
+  function normalizeKullaniciAdi(girdi) {
+    if (typeof girdi !== 'string') return '';
+    let s = girdi.trim();
+    if (/instagram\.com\//i.test(s)) {
+      const u = kullaniciAdiUrldenCikar(s);
+      if (u) s = u;
+    }
+    s = s.replace(/^@+/, '').trim();
+    // Türkçe "İ" gibi harfler için toLocaleLowerCase yerine ASCII davranışı yeterli;
+    // Instagram kullanıcı adları yalnızca a-z, 0-9, nokta ve alt çizgi içerir.
+    return s.toLowerCase();
+  }
+
+  // İşletme durumu: dışa aktarımda güvenilir bir alan varsa yalnızca onu kullanır.
+  // Kullanıcı adı, ad, biyografi veya takipçi sayısından TAHMİN YAPMAZ.
+  function isletmeAlaniOku(kayit) {
+    const adaylar = [kayit];
+    if (dizimi(kayit.string_list_data) && kayit.string_list_data[0]) adaylar.push(kayit.string_list_data[0]);
+    for (const n of adaylar) {
+      if (!nesneMi(n)) continue;
+      if (n.is_business === true || n.is_professional === true || n.is_business_account === true) {
+        return { deger: true, kaynak: 'is_business alanı' };
+      }
+      if (typeof n.account_type === 'string' && /business|professional|creator/i.test(n.account_type)) {
+        return { deger: true, kaynak: 'account_type alanı: ' + n.account_type };
+      }
+    }
+    return null;
+  }
+
+  // Tek bir ilişki kaydını çözer: { kullaniciAdi, norm, zamanMs, isletme }
+  function iliskiKaydiniCoz(kayit) {
+    if (!nesneMi(kayit)) return null;
+    const sld = dizimi(kayit.string_list_data) && kayit.string_list_data.length > 0 ? kayit.string_list_data[0] : null;
+    let orijinal = null;
+    if (sld && typeof sld.value === 'string' && sld.value.trim()) orijinal = sld.value.trim();
+    else if (typeof kayit.title === 'string' && kayit.title.trim()) orijinal = kayit.title.trim();
+    else if (sld && typeof sld.href === 'string') orijinal = kullaniciAdiUrldenCikar(sld.href);
+    if (!orijinal) return null;
+    orijinal = mojibakeDuzelt(orijinal);
+    const norm = normalizeKullaniciAdi(orijinal);
+    if (!norm) return null;
+    let zamanMs = null;
+    if (sld && typeof sld.timestamp === 'number') {
+      // Dışa aktarımda saniye cinsinden; 10^12 üstü zaten milisaniyedir.
+      zamanMs = sld.timestamp > 1e12 ? sld.timestamp : sld.timestamp * 1000;
+    }
+    return { kullaniciAdi: orijinal.replace(/^@/, ''), norm, zamanMs, isletme: isletmeAlaniOku(kayit) };
+  }
+
+  function yeniHesap(norm, kullaniciAdi) {
+    return {
+      norm,
+      kullaniciAdi, // görüntüleme için orijinal yazım
+      takipEdiyorum: false,
+      beniTakipEdiyor: false,
+      istekGonderildi: false,
+      takipTarihiMs: null, // benim onu takip etmeye başladığım zaman (varsa)
+      takipciTarihiMs: null, // onun beni takip etmeye başladığı zaman (varsa)
+      istekTarihiMs: null,
+      kaynakDosyalar: [],
+      isletmeVeri: null, // { deger: true, kaynak } yalnızca dışa aktarımda alan varsa
+      sonDm: { durum: 'arsivYok', zamanMs: null, kaynak: null, eslesme: null },
+    };
+  }
+
+  // Okunmuş dosyalardan tekilleştirilmiş hesap haritası üretir (Map<norm, hesap>).
+  function hesaplariBirlestir(dosyalar, kullaniciAdimNorm) {
+    const hesaplar = new Map();
+    const sayilar = { takipciler: 0, takipEdilenler: 0, istekGonderilen: 0, gecersizKayit: 0, kendisiAtlandi: 0 };
+
+    function al(coz, kaynak) {
+      let h = hesaplar.get(coz.norm);
+      if (!h) {
+        h = yeniHesap(coz.norm, coz.kullaniciAdi);
+        hesaplar.set(coz.norm, h);
+      }
+      if (!h.kaynakDosyalar.includes(kaynak)) h.kaynakDosyalar.push(kaynak);
+      if (coz.isletme && !h.isletmeVeri) h.isletmeVeri = coz.isletme;
+      return h;
+    }
+
+    for (const d of dosyalar) {
+      if (!['takipciler', 'takipEdilenler', 'istekGonderilen'].includes(d.tur)) continue;
+      if (!dizimi(d.kayitlar)) continue;
+      for (const kayit of d.kayitlar) {
+        const coz = iliskiKaydiniCoz(kayit);
+        if (!coz) {
+          sayilar.gecersizKayit++;
+          continue;
+        }
+        if (kullaniciAdimNorm && coz.norm === kullaniciAdimNorm) {
+          sayilar.kendisiAtlandi++;
+          continue;
+        }
+        const h = al(coz, d.yol);
+        if (d.tur === 'takipciler') {
+          h.beniTakipEdiyor = true;
+          if (coz.zamanMs && (!h.takipciTarihiMs || coz.zamanMs > h.takipciTarihiMs)) h.takipciTarihiMs = coz.zamanMs;
+          sayilar.takipciler++;
+        } else if (d.tur === 'takipEdilenler') {
+          h.takipEdiyorum = true;
+          if (coz.zamanMs && (!h.takipTarihiMs || coz.zamanMs > h.takipTarihiMs)) h.takipTarihiMs = coz.zamanMs;
+          sayilar.takipEdilenler++;
+        } else if (d.tur === 'istekGonderilen') {
+          h.istekGonderildi = true;
+          if (coz.zamanMs && (!h.istekTarihiMs || coz.zamanMs > h.istekTarihiMs)) h.istekTarihiMs = coz.zamanMs;
+          sayilar.istekGonderilen++;
+        }
+      }
+    }
+    return { hesaplar, sayilar };
+  }
+
+  // İlişki durumu etiketi (bir hesap birden fazla listede görünebilir; bu, satırda gösterilen özet).
+  const ILISKI_ETIKETLERI = {
+    karsilikli: 'Karşılıklı takip',
+    takipEdiyorumBeniEtmiyor: 'Takip ediyorum, beni takip etmiyor',
+    beniTakipEdiyorBenEtmiyorum: 'Beni takip ediyor, ben takip etmiyorum',
+    istekBekliyor: 'Takip isteğim bekliyor',
+    hicbiri: 'İlişki yok',
+  };
+
+  function iliskiTuru(h) {
+    if (h.takipEdiyorum && h.beniTakipEdiyor) return 'karsilikli';
+    if (h.takipEdiyorum) return 'takipEdiyorumBeniEtmiyor';
+    if (h.beniTakipEdiyor) return 'beniTakipEdiyorBenEtmiyorum';
+    if (h.istekGonderildi) return 'istekBekliyor';
+    return 'hicbiri';
+  }
+
+  // [[BÖLÜM: dm]]
+
+  // ---------------------------------------------------------------------------
+  // Liste tanımları: her liste, hesap için bir yüklem (predicate).
+  // ---------------------------------------------------------------------------
+
+  const LISTE_TANIMLARI = [
+    {
+      ad: 'takipEtmeyenler',
+      baslik: 'Takip ettiklerim ama beni takip etmeyenler',
+      aciklama: 'Takip ettiklerim − takipçilerim.',
+      yuklem: (h) => h.takipEdiyorum && !h.beniTakipEdiyor,
+    },
+    {
+      ad: 'dmYok',
+      baslik: 'Son 1 yıldır DM etkileşimi olmayanlar',
+      aciklama:
+        'Takip ettiğim ve son 365 günde birebir (grup dışı) DM alışverişi bulunmayan hesaplar. ' +
+        '"Konuşma bulunamadı" ve "arşiv eksik" durumları hiç yazışılmadığının kanıtı DEĞİLDİR.',
+      yuklem: (h) => h.takipEdiyorum && h.sonDm.durum !== 'var',
+    },
+    {
+      ad: 'isletme',
+      baslik: 'İşletme hesapları',
+      aciklama:
+        'Dışa aktarılan veride güvenilir bir işletme alanı bulunmadığından bu durum çevrimdışı doğrulanamaz. ' +
+        'Yalnızca elle işaretlediğiniz hesaplar (ve veri açıkça belirtiyorsa) burada listelenir.',
+      yuklem: (h) => h.isletme.durum !== 'dogrulanamaz',
+    },
+    {
+      ad: 'takipEtmediklerim',
+      baslik: 'Beni takip eden ama benim takip etmediklerim',
+      aciklama: 'Takipçilerim − takip ettiklerim.',
+      yuklem: (h) => h.beniTakipEdiyor && !h.takipEdiyorum,
+    },
+    {
+      ad: 'karsilikli',
+      baslik: 'Karşılıklı takipleştiklerim',
+      aciklama: 'Takipçilerim ∩ takip ettiklerim.',
+      yuklem: (h) => h.beniTakipEdiyor && h.takipEdiyorum,
+    },
+    {
+      ad: 'istekler',
+      baslik: 'Takip isteği gönderdiklerim',
+      aciklama:
+        'Arşivdeki "gönderilen bekleyen istekler" dosyasından. Gelen istekler bu listeye alınmaz. ' +
+        'Eski bir arşiv, isteğin güncel durumunu (kabul/iptal) yansıtmayabilir.',
+      yuklem: (h) => h.istekGonderildi,
+    },
+  ];
+
+  function isletmeDurumu(h, manuelIsletme) {
+    if (h.isletmeVeri && h.isletmeVeri.deger === true) return { durum: 'veriEvet', kaynak: h.isletmeVeri.kaynak };
+    if (manuelIsletme && manuelIsletme.has(h.norm)) return { durum: 'manuelEvet', kaynak: 'Elle işaretlendi' };
+    return { durum: 'dogrulanamaz', kaynak: 'Çevrimdışı doğrulanamaz' };
+  }
+
+  // Tüm analiz: saf fonksiyon. Girdi: okunmuş dosyalar + seçenekler. Çıktı: hesaplar ve listeler.
+  // secenekler: { kullaniciAdim, simdiMs, grupDahil, manuelIsletme:Set }
+  function analizEt(dosyalar, secenekler) {
+    const s = secenekler || {};
+    const simdiMs = typeof s.simdiMs === 'number' ? s.simdiMs : Date.now();
+    const kullaniciAdimNorm = normalizeKullaniciAdi(s.kullaniciAdim || '');
+    const manuelIsletme = s.manuelIsletme instanceof Set ? s.manuelIsletme : new Set();
+
+    const { hesaplar, sayilar } = hesaplariBirlestir(dosyalar, kullaniciAdimNorm);
+    // [[ANALİZ: dm uygulama]]
+
+    const dizi = [];
+    for (const h of hesaplar.values()) {
+      h.iliski = iliskiTuru(h);
+      h.isletme = isletmeDurumu(h, manuelIsletme);
+      dizi.push(h);
+    }
+    dizi.sort((a, b) => a.norm.localeCompare(b.norm));
+
+    const listeler = {};
+    for (const t of LISTE_TANIMLARI) listeler[t.ad] = dizi.filter(t.yuklem).map((h) => h.norm);
+
+    const uyarilar = [];
+    if (sayilar.gecersizKayit > 0) uyarilar.push(sayilar.gecersizKayit + ' kayıt kullanıcı adı çıkarılamadığı için atlandı.');
+    if (sayilar.kendisiAtlandi > 0) uyarilar.push('Kendi kullanıcı adınız listelerden çıkarıldı.');
+    // [[ANALİZ: dm uyarıları]]
+
+    return { hesaplar: dizi, listeler, sayilar, uyarilar, simdiMs, kullaniciAdimNorm, dm: null };
+  }
 
   // ===========================================================================
   // Dışa verilen saf API (test ve denetim için; hiçbir fonksiyon durum değiştirmez)
@@ -253,6 +486,14 @@
     veriSetleriniOzetle,
     VERI_SETI_ETIKETLERI,
     GEREKLI_VERI_SETLERI,
+    normalizeKullaniciAdi,
+    kullaniciAdiUrldenCikar,
+    iliskiKaydiniCoz,
+    hesaplariBirlestir,
+    iliskiTuru,
+    ILISKI_ETIKETLERI,
+    LISTE_TANIMLARI,
+    analizEt,
     // [[API: fonksiyonlar]]
   });
 
@@ -436,8 +677,19 @@
     kullaniciAdiOnerisi: null,
     kullaniciAdim: '',
     kullaniciAdiOnaylandi: false,
+    analiz: null, // analizEt() sonucu
     // [[DURUM: alanlar]]
   };
+
+  // Analizi (yeniden) çalıştırır. Saf analizEt fonksiyonunu bellekteki dosyalarla çağırır.
+  function analiziCalistir() {
+    if (!durum.kullaniciAdiOnaylandi) return;
+    durum.analiz = analizEt(durum.dosyalar, {
+      kullaniciAdim: durum.kullaniciAdim,
+      simdiMs: Date.now(),
+      // [[ANALİZ ÇAĞRISI: seçenekler]]
+    });
+  }
 
   // ===========================================================================
   // Yerel dosya okuma
@@ -518,7 +770,7 @@
         }
       }
       durum.kullaniciAdiOnaylandi = false;
-      // [[İÇE AKTARMA: analiz tetikleme]]
+      durum.analiz = null;
     } finally {
       durum.okunuyor = false;
       ciz();
@@ -537,6 +789,7 @@
     durum.kullaniciAdiOnerisi = null;
     durum.kullaniciAdim = '';
     durum.kullaniciAdiOnaylandi = false;
+    durum.analiz = null;
     // [[SIFIRLA: ek alanlar]]
     ciz();
   }
@@ -725,7 +978,8 @@
               }
               durum.kullaniciAdim = adGirdi.value.trim();
               durum.kullaniciAdiOnaylandi = true;
-              // [[ONAY: analiz]]
+              analiziCalistir();
+              durum.goruntu = 'listeler';
               ciz();
             },
           }),
