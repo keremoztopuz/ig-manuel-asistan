@@ -49,9 +49,190 @@
   const UYARI_DOGRULAMA_YOK =
     'Araç, Instagram üzerinde bir işlemi gerçekten yapıp yapmadığınızı doğrulayamaz. "Tamamlandı" işareti yalnızca yerel bir kayıttır.';
 
-  // [[BÖLÜM: yardımcılar]]
+  // ===========================================================================
+  // 2. Saf yardımcılar (DOM'a ve ağa dokunmaz)
+  // ===========================================================================
 
-  // [[BÖLÜM: veri seti algılama]]
+  // Instagram JSON dışa aktarımı, UTF-8 baytlarını Latin-1 karakterleri gibi kaçırır
+  // ("Ã¼" → "ü"). Bu fonksiyon yalnızca metni düzeltir; başarısız olursa
+  // girdiyi olduğu gibi döndürür.
+  function mojibakeDuzelt(metin) {
+    if (typeof metin !== 'string' || metin.length === 0) return metin;
+    let yuksekVar = false;
+    for (let i = 0; i < metin.length; i++) {
+      const kod = metin.charCodeAt(i);
+      if (kod > 0xff) return metin; // zaten gerçek Unicode
+      if (kod >= 0x80) yuksekVar = true;
+    }
+    if (!yuksekVar) return metin;
+    try {
+      const baytlar = new Uint8Array(metin.length);
+      for (let i = 0; i < metin.length; i++) baytlar[i] = metin.charCodeAt(i);
+      return new TextDecoder('utf-8', { fatal: true }).decode(baytlar);
+    } catch (_hata) {
+      return metin;
+    }
+  }
+
+  // Dosya yolunu karşılaştırma için sadeleştirir: ters bölü → bölü, küçük harf.
+  function yolNormalize(yol) {
+    return String(yol || '').replace(/\\/g, '/').toLowerCase();
+  }
+
+  function dosyaAdi(yol) {
+    const parcalar = yolNormalize(yol).split('/');
+    return parcalar[parcalar.length - 1] || '';
+  }
+
+  function dizimi(x) {
+    return Array.isArray(x);
+  }
+
+  function nesneMi(x) {
+    return x !== null && typeof x === 'object' && !Array.isArray(x);
+  }
+
+  // Instagram ilişki dosyalarındaki tek bir kaydın beklenen biçimde olup olmadığını
+  // kontrol eder: { title?, string_list_data: [{ href?, value?, timestamp? }] }
+  function iliskiKaydiMi(kayit) {
+    if (!nesneMi(kayit)) return false;
+    if (!dizimi(kayit.string_list_data)) return false;
+    if (kayit.string_list_data.length === 0) return typeof kayit.title === 'string';
+    const ilk = kayit.string_list_data[0];
+    return nesneMi(ilk) && (typeof ilk.value === 'string' || typeof ilk.href === 'string');
+  }
+
+  function iliskiListesiMi(dizi) {
+    if (!dizimi(dizi)) return false;
+    if (dizi.length === 0) return true; // boş liste de geçerli (ör. hiç takipçi yok)
+    // İlk birkaç kaydı örnekle; tamamını taramak gerekmiyor.
+    const ornek = dizi.slice(0, 5);
+    return ornek.every(iliskiKaydiMi);
+  }
+
+  // DM iş parçacığı dosyası: { participants: [{name}], messages: [{sender_name, timestamp_ms}] }
+  function dmDosyasiMi(json) {
+    if (!nesneMi(json)) return false;
+    if (!dizimi(json.participants) || !dizimi(json.messages)) return false;
+    if (json.messages.length === 0) return true;
+    const ilk = json.messages[0];
+    return nesneMi(ilk) && (typeof ilk.timestamp_ms === 'number' || typeof ilk.sender_name === 'string');
+  }
+
+  // ===========================================================================
+  // 3. Veri seti algılama (hem yol hem JSON yapısı; dosya adına tek başına güvenilmez)
+  // ===========================================================================
+
+  // Bilinen ilişki anahtarları → veri seti türü
+  const ILISKI_ANAHTARLARI = {
+    relationships_followers: 'takipciler',
+    relationships_following: 'takipEdilenler',
+    relationships_follow_requests_sent: 'istekGonderilen',
+    relationships_follow_requests_received: 'istekGelen',
+    relationships_permanent_follow_requests: 'iliskiDiger',
+    relationships_close_friends: 'iliskiDiger',
+    relationships_blocked_users: 'iliskiDiger',
+    relationships_restricted_users: 'iliskiDiger',
+    relationships_hide_stories_from: 'iliskiDiger',
+    relationships_unfollowed_users: 'iliskiDiger',
+    relationships_dismissed_suggested_users: 'iliskiDiger',
+  };
+
+  const VERI_SETI_ETIKETLERI = {
+    takipciler: 'Takipçiler',
+    takipEdilenler: 'Takip ettiklerim',
+    istekGonderilen: 'Gönderdiğim bekleyen takip istekleri',
+    istekGelen: 'Bana gelen takip istekleri (kullanılmaz, yalnızca ayırt edilir)',
+    dm: 'Direkt mesaj konuşması',
+    kisiselBilgi: 'Kişisel bilgi (kullanıcı adı önerisi için)',
+    iliskiDiger: 'Diğer ilişki dosyası (kullanılmaz)',
+    bilinmeyen: 'Tanınmadı',
+  };
+
+  const GEREKLI_VERI_SETLERI = [
+    { tur: 'takipciler', zorunlu: true, aciklama: 'followers_*.json benzeri takipçi listesi' },
+    { tur: 'takipEdilenler', zorunlu: true, aciklama: 'following.json benzeri takip listesi' },
+    { tur: 'istekGonderilen', zorunlu: false, aciklama: 'pending_follow_requests.json benzeri gönderilen istekler' },
+    { tur: 'dm', zorunlu: false, aciklama: 'messages/inbox/*/message_*.json konuşmaları' },
+  ];
+
+  // Bir dosyanın yolu ve içeriğinden veri seti türünü ve kayıt dizisini çıkarır.
+  // Dönüş: { tur, kayitlar (dizi ya da null), not }
+  function veriSetiTuruBul(yol, json) {
+    const y = yolNormalize(yol);
+    const ad = dosyaAdi(yol);
+
+    // 1) Nesne kökünde bilinen ilişki anahtarı var mı?
+    if (nesneMi(json)) {
+      for (const [anahtar, tur] of Object.entries(ILISKI_ANAHTARLARI)) {
+        if (anahtar in json && iliskiListesiMi(json[anahtar])) {
+          return { tur, kayitlar: json[anahtar], not: 'Anahtar: ' + anahtar };
+        }
+      }
+      // DM iş parçacığı
+      if (dmDosyasiMi(json)) {
+        if (y.includes('message_requests')) {
+          return { tur: 'iliskiDiger', kayitlar: null, not: 'Mesaj isteği klasörü; gelen kutusu değil, kullanılmaz' };
+        }
+        const gelenKutusu = y.includes('/inbox/') || y.startsWith('inbox/');
+        return { tur: 'dm', kayitlar: json.messages, not: gelenKutusu ? 'inbox altında' : 'inbox yolu doğrulanamadı, yapıya göre tanındı' };
+      }
+      // Kişisel bilgi
+      if (dizimi(json.profile_user) && json.profile_user.some((k) => nesneMi(k) && nesneMi(k.string_map_data))) {
+        return { tur: 'kisiselBilgi', kayitlar: json.profile_user, not: 'profile_user' };
+      }
+    }
+
+    // 2) Kök dizi: yeni biçimde followers_N.json böyle gelir. Yol ipucuyla ayırt edilir.
+    if (dizimi(json) && iliskiListesiMi(json)) {
+      if (/followers/.test(ad) || /followers/.test(y)) {
+        return { tur: 'takipciler', kayitlar: json, not: 'Kök dizi + yolda "followers"' };
+      }
+      if (/following/.test(ad)) {
+        return { tur: 'takipEdilenler', kayitlar: json, not: 'Kök dizi + adında "following"' };
+      }
+      if (/pending_follow_requests|follow_requests_sent/.test(ad)) {
+        return { tur: 'istekGonderilen', kayitlar: json, not: 'Kök dizi + adında "pending/sent"' };
+      }
+      if (/received/.test(ad)) {
+        return { tur: 'istekGelen', kayitlar: json, not: 'Kök dizi + adında "received"' };
+      }
+      return { tur: 'bilinmeyen', kayitlar: null, not: 'İlişki listesi yapısında ama hangisi olduğu yoldan anlaşılamadı' };
+    }
+
+    return { tur: 'bilinmeyen', kayitlar: null, not: 'Bilinen bir Instagram veri yapısıyla eşleşmedi' };
+  }
+
+  // Kişisel bilgi dosyasından kullanıcı adı önerisi çıkarır (anahtar adı dile göre değişebilir).
+  function kullaniciAdiOnerisiBul(profileUser) {
+    if (!dizimi(profileUser)) return null;
+    for (const kayit of profileUser) {
+      if (!nesneMi(kayit) || !nesneMi(kayit.string_map_data)) continue;
+      for (const [anahtar, deger] of Object.entries(kayit.string_map_data)) {
+        if (!nesneMi(deger)) continue;
+        const a = mojibakeDuzelt(anahtar).toLowerCase();
+        if (a === 'username' || a === 'kullanıcı adı' || a === 'kullanici adi') {
+          if (typeof deger.value === 'string' && deger.value.trim()) return mojibakeDuzelt(deger.value.trim());
+        }
+        if (typeof deger.href === 'string') {
+          const m = deger.href.match(/instagram\.com\/([A-Za-z0-9._]+)\/?$/);
+          if (m) return m[1];
+        }
+      }
+    }
+    return null;
+  }
+
+  // Okunmuş dosya listesinden özet çıkarır: hangi türden kaç dosya var, hangileri eksik.
+  function veriSetleriniOzetle(dosyalar) {
+    const sayim = {};
+    for (const d of dosyalar) {
+      if (!d.tur) continue;
+      sayim[d.tur] = (sayim[d.tur] || 0) + 1;
+    }
+    const eksikler = GEREKLI_VERI_SETLERI.filter((g) => !sayim[g.tur]);
+    return { sayim, eksikler };
+  }
 
   // [[BÖLÜM: analiz]]
 
@@ -65,6 +246,13 @@
     DM_ESIK_GUN,
     BEKLEME_MIN_SN,
     BEKLEME_MAX_SN,
+    mojibakeDuzelt,
+    yolNormalize,
+    veriSetiTuruBul,
+    kullaniciAdiOnerisiBul,
+    veriSetleriniOzetle,
+    VERI_SETI_ETIKETLERI,
+    GEREKLI_VERI_SETLERI,
     // [[API: fonksiyonlar]]
   });
 
@@ -226,6 +414,10 @@
     ul.liste li { margin: 2px 0; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--bg2); padding: 1px 4px; border-radius: 4px; }
     .altbilgi { padding: 8px 14px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+    .tablo-kap { overflow-x: auto; max-width: 100%; }
+    table.tablo { border-collapse: collapse; width: 100%; font-size: 13px; }
+    table.tablo th, table.tablo td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    table.tablo th { background: var(--bg2); position: sticky; top: 0; }
     /* [[STİL: ek]] */
   `;
 
@@ -237,8 +429,117 @@
     goruntu: 'veri', // veri | listeler | kuyruk | kayit | bilgi
     kucultulmus: false,
     kuyruk: null, // etkin kuyruk varsa nesne (ileriki bölümlerde doldurulur)
+    dosyalar: [], // { yol, ad, boyut, json, tur, kayitlar, kayitSayisi, not }
+    atlananDosyaSayisi: 0,
+    okumaHatalari: [],
+    okunuyor: false,
+    kullaniciAdiOnerisi: null,
+    kullaniciAdim: '',
+    kullaniciAdiOnaylandi: false,
     // [[DURUM: alanlar]]
   };
+
+  // ===========================================================================
+  // Yerel dosya okuma
+  // Bu bölüm AĞ İSTEĞİ YAPMAZ. Dosyalar, kullanıcının seçtiği yerel dosya nesnelerinden
+  // File.text() ile tarayıcı belleğine okunur; hiçbir yere gönderilmez.
+  // ===========================================================================
+
+  async function dosyalariOku(dosyaListesi) {
+    const liste = Array.from(dosyaListesi || []);
+    const sonuc = [];
+    let atlanan = 0;
+    const hatalar = [];
+    const htmlVar = liste.some((f) => /\.html?$/i.test(f.name));
+
+    for (const f of liste) {
+      const yol = f.webkitRelativePath || f.name;
+      if (!/\.json$/i.test(f.name)) {
+        atlanan++;
+        continue;
+      }
+      // Çok büyük dosyalar (medya listeleri vb.) analiz için gerekmez; 64 MB üstü atlanır.
+      if (f.size > 64 * 1024 * 1024) {
+        hatalar.push(yol + ': dosya 64 MB sınırını aşıyor, atlandı.');
+        continue;
+      }
+      let metin;
+      try {
+        metin = await f.text();
+      } catch (hata) {
+        hatalar.push(yol + ': dosya okunamadı (' + (hata && hata.message ? hata.message : 'bilinmeyen hata') + ').');
+        continue;
+      }
+      let json;
+      try {
+        json = JSON.parse(metin);
+      } catch (hata) {
+        hatalar.push(yol + ': geçerli JSON değil (' + (hata && hata.message ? hata.message : 'ayrıştırma hatası') + ').');
+        continue;
+      }
+      const tani = veriSetiTuruBul(yol, json);
+      sonuc.push({
+        yol,
+        ad: f.name,
+        boyut: f.size,
+        json,
+        tur: tani.tur,
+        kayitlar: tani.kayitlar,
+        kayitSayisi: tani.kayitlar ? tani.kayitlar.length : null,
+        not: tani.not,
+      });
+    }
+
+    if (htmlVar && sonuc.length === 0) {
+      hatalar.push(
+        'Seçilen dosyalar HTML biçiminde görünüyor. Instagram "Bilgilerini indir" sayfasında biçim olarak JSON seçip arşivi yeniden indirin.'
+      );
+    }
+    return { dosyalar: sonuc, atlanan, hatalar };
+  }
+
+  async function iceAktar(dosyaListesi) {
+    durum.okunuyor = true;
+    ciz();
+    try {
+      const { dosyalar, atlanan, hatalar } = await dosyalariOku(dosyaListesi);
+      // Aynı yol yeniden seçilirse eskisinin yerine geçer; farklı yollar birikir.
+      const yollar = new Set(dosyalar.map((d) => yolNormalize(d.yol)));
+      durum.dosyalar = durum.dosyalar.filter((d) => !yollar.has(yolNormalize(d.yol))).concat(dosyalar);
+      durum.atlananDosyaSayisi += atlanan;
+      durum.okumaHatalari = hatalar;
+
+      const kisisel = durum.dosyalar.find((d) => d.tur === 'kisiselBilgi');
+      if (kisisel) {
+        const oneri = kullaniciAdiOnerisiBul(kisisel.kayitlar);
+        if (oneri) {
+          durum.kullaniciAdiOnerisi = oneri;
+          if (!durum.kullaniciAdim) durum.kullaniciAdim = oneri;
+        }
+      }
+      durum.kullaniciAdiOnaylandi = false;
+      // [[İÇE AKTARMA: analiz tetikleme]]
+    } finally {
+      durum.okunuyor = false;
+      ciz();
+    }
+  }
+
+  function veriyiSifirla() {
+    if (kuyrukEtkinMi()) {
+      const onay = window.confirm('Etkin bir kuyruk var. Veri sıfırlanırsa kuyruk da iptal edilir. Devam edilsin mi?');
+      if (!onay) return;
+      durum.kuyruk = null;
+    }
+    durum.dosyalar = [];
+    durum.atlananDosyaSayisi = 0;
+    durum.okumaHatalari = [];
+    durum.kullaniciAdiOnerisi = null;
+    durum.kullaniciAdim = '';
+    durum.kullaniciAdiOnaylandi = false;
+    // [[SIFIRLA: ek alanlar]]
+    ciz();
+  }
 
   // ===========================================================================
   // Panel iskeleti
@@ -337,8 +638,120 @@
   // ---------------------------------------------------------------------------
 
   function cizVeri(kap) {
-    kap.appendChild(el('h2', { text: 'Veri' }));
-    kap.appendChild(el('p', { class: 'sessiz', text: 'İçe aktarma bölümü henüz eklenmedi.' }));
+    kap.appendChild(el('h2', { text: 'Veri: Instagram arşivini içe aktar' }));
+    kap.appendChild(
+      el('p', { class: 'sessiz' }, [
+        'Instagram → Ayarlar → Hesaplar Merkezi → Bilgilerini indir → biçim olarak ',
+        el('strong', { text: 'JSON' }),
+        ' seçin. İndirdiğiniz ZIP dosyasını bilgisayarınızda açın; ardından aşağıdan ' +
+          'çıkan klasörü ya da içindeki JSON dosyalarını seçin. Dosyalar yalnızca bu sekmede okunur.',
+      ])
+    );
+
+    // Dosya seçiciler: yalnızca yerel okuma. Bu girdiler hiçbir yere yükleme yapmaz.
+    const cokluGirdi = el('input', { type: 'file', multiple: true, accept: '.json,application/json' });
+    cokluGirdi.addEventListener('change', () => iceAktar(cokluGirdi.files));
+    const klasorGirdi = el('input', { type: 'file' });
+    klasorGirdi.setAttribute('webkitdirectory', '');
+    klasorGirdi.setAttribute('directory', '');
+    klasorGirdi.addEventListener('change', () => iceAktar(klasorGirdi.files));
+
+    kap.appendChild(
+      el('div', { class: 'kart' }, [
+        el('div', { class: 'satir' }, [el('label', { text: 'JSON dosyaları seç: ' }), cokluGirdi]),
+        el('div', { class: 'satir' }, [el('label', { text: 'Arşiv klasörünü seç: ' }), klasorGirdi]),
+        el('p', {
+          class: 'sessiz',
+          text: 'Klasör seçiminde alt klasörlerdeki tüm dosyalar taranır; JSON olmayanlar atlanır. ' +
+            'Büyük arşivlerde okuma birkaç saniye sürebilir.',
+        }),
+        durum.okunuyor ? el('p', { text: 'Dosyalar okunuyor…' }) : null,
+        durum.dosyalar.length > 0 ? el('button', { class: 'kucuk tehlike', text: 'İçe aktarılanları sıfırla', onclick: veriyiSifirla }) : null,
+      ])
+    );
+
+    if (durum.okumaHatalari.length > 0) {
+      kap.appendChild(el('h3', { text: 'Okuma / ayrıştırma hataları' }));
+      kap.appendChild(el('ul', { class: 'liste hata' }, durum.okumaHatalari.map((h) => el('li', { text: h }))));
+    }
+
+    if (durum.dosyalar.length === 0) {
+      kap.appendChild(el('p', { class: 'sessiz', text: 'Henüz dosya seçilmedi.' }));
+      return;
+    }
+
+    const { sayim, eksikler } = veriSetleriniOzetle(durum.dosyalar);
+
+    // Gerekli / eksik veri setleri
+    kap.appendChild(el('h3', { text: 'Gerekli veri setleri' }));
+    kap.appendChild(
+      el('ul', { class: 'liste' }, GEREKLI_VERI_SETLERI.map((g) => {
+        const mevcut = !!sayim[g.tur];
+        return el('li', { class: mevcut ? 'basarili' : g.zorunlu ? 'hata' : '' }, [
+          (mevcut ? '✔ ' : '✘ ') + VERI_SETI_ETIKETLERI[g.tur] + (mevcut ? ' (' + sayim[g.tur] + ' dosya)' : ' — eksik'),
+          el('span', { class: 'sessiz', text: ' · ' + g.aciklama + (g.zorunlu ? ' · zorunlu' : ' · isteğe bağlı') }),
+        ]);
+      }))
+    );
+    const zorunluEksik = eksikler.filter((e) => e.zorunlu);
+    if (zorunluEksik.length > 0) {
+      kap.appendChild(el('p', { class: 'hata', text: 'Zorunlu veri setleri eksik olduğu için analiz yapılamaz. Eksik dosyaları ekleyin.' }));
+    }
+    if (!sayim.dm) {
+      kap.appendChild(el('p', { class: 'sessiz', text: 'Mesaj arşivi yüklenmedi: DM sekmesi "arşiv eksik" durumunu gösterir; bu, hiç yazışılmadığı anlamına gelmez.' }));
+    }
+
+    // Kullanıcı adı onayı
+    kap.appendChild(el('h3', { text: 'Kullanıcı adınızı onaylayın' }));
+    const adGirdi = el('input', { type: 'text', value: durum.kullaniciAdim, placeholder: 'kullanici_adiniz', spellcheck: 'false' });
+    adGirdi.addEventListener('input', () => {
+      durum.kullaniciAdim = adGirdi.value;
+      durum.kullaniciAdiOnaylandi = false;
+    });
+    kap.appendChild(
+      el('div', { class: 'kart' }, [
+        el('p', { class: 'sessiz', text: durum.kullaniciAdiOnerisi ? 'Arşivden çıkarılan öneri: ' + durum.kullaniciAdiOnerisi : 'Arşivde kişisel bilgi dosyası bulunamadı; kullanıcı adınızı elle yazın.' }),
+        el('div', { class: 'satir' }, [
+          el('span', { text: '@' }),
+          adGirdi,
+          el('button', {
+            class: 'birincil',
+            text: durum.kullaniciAdiOnaylandi ? 'Onaylandı ✔' : 'Kullanıcı adını onayla',
+            disabled: zorunluEksik.length > 0,
+            onclick: () => {
+              if (!adGirdi.value.trim()) {
+                window.alert('Lütfen kullanıcı adınızı girin.');
+                return;
+              }
+              durum.kullaniciAdim = adGirdi.value.trim();
+              durum.kullaniciAdiOnaylandi = true;
+              // [[ONAY: analiz]]
+              ciz();
+            },
+          }),
+        ]),
+        el('p', { class: 'sessiz', text: 'Kullanıcı adı, DM konuşmalarında karşı tarafı ayırt etmek için kullanılır.' }),
+      ])
+    );
+
+    // Tespit edilen dosyalar
+    kap.appendChild(el('h3', { text: 'Tespit edilen dosyalar (' + durum.dosyalar.length + ')' }));
+    if (durum.atlananDosyaSayisi > 0) {
+      kap.appendChild(el('p', { class: 'sessiz', text: durum.atlananDosyaSayisi + ' JSON olmayan dosya atlandı.' }));
+    }
+    const sirali = durum.dosyalar.slice().sort((a, b) => a.yol.localeCompare(b.yol, 'tr'));
+    const tablo = el('table', { class: 'tablo' }, [
+      el('thead', {}, el('tr', {}, ['Dosya', 'Tür', 'Kayıt', 'Not'].map((b) => el('th', { text: b })))),
+      el('tbody', {}, sirali.map((d) =>
+        el('tr', { class: d.tur === 'bilinmeyen' ? 'sessiz' : '' }, [
+          el('td', {}, el('code', { text: d.yol })),
+          el('td', { text: VERI_SETI_ETIKETLERI[d.tur] || d.tur }),
+          el('td', { text: d.kayitSayisi === null ? '–' : String(d.kayitSayisi) }),
+          el('td', { class: 'sessiz', text: d.not || '' }),
+        ])
+      )),
+    ]);
+    kap.appendChild(el('div', { class: 'tablo-kap' }, tablo));
   }
 
   function cizListeler(kap) {
