@@ -686,7 +686,6 @@
     DM_DURUM_ETIKETLERI,
     rastgeleSaniye,
     MANUEL_TALIMATLAR,
-    // [[API: fonksiyonlar]]
   });
 
   // Node ortamında (testler) yalnızca saf fonksiyonlar dışa verilir; arayüz kurulmaz.
@@ -908,7 +907,6 @@
       input[type="search"] { min-width: 120px; flex: 1; }
       select { max-width: 100%; }
     }
-    /* [[STİL: ek]] */
   `;
 
   // ===========================================================================
@@ -942,7 +940,6 @@
       filtreler: { dm: 'hepsi', isletme: 'hepsi', kaynak: 'hepsi', secili: 'hepsi' },
       sayfa: 1,
     },
-    // [[DURUM: alanlar]]
   };
 
   // Analizi (yeniden) çalıştırır. Saf analizEt fonksiyonunu bellekteki dosyalarla çağırır.
@@ -953,7 +950,6 @@
       simdiMs: Date.now(),
       grupDahil: durum.grupDahil,
       manuelIsletme: durum.manuelIsletme,
-      // [[ANALİZ ÇAĞRISI: seçenekler]]
     });
   }
 
@@ -1059,7 +1055,6 @@
     durum.analiz = null;
     durum.secilenler = new Set();
     durum.liste.sayfa = 1;
-    // [[SIFIRLA: ek alanlar]]
     ciz();
   }
 
@@ -1424,7 +1419,6 @@
         el('p', { class: 'sessiz', text: 'Bir hesabı herhangi bir sekmede "İşletme olarak işaretle" düğmesiyle buraya ekleyebilir, aynı düğmeyle işareti kaldırabilirsiniz. Elle işaretler yalnızca bu tarayıcıda tutulur.' })
       );
     }
-    // [[LİSTE: sekme ek]]
 
     // Araç çubuğu: arama, sıralama, filtreler
     const aramaGirdi = el('input', { type: 'search', value: durum.liste.arama, placeholder: 'Kullanıcı adında ara' });
@@ -1493,7 +1487,6 @@
       secimSatiri.appendChild(el('button', { class: 'kucuk birincil', text: 'Seçilenlerden manuel kuyruk oluştur (' + durum.secilenler.size + ')', disabled: durum.secilenler.size === 0, onclick: () => {
         kuyrukOlustur();
       } }));
-      // [[LİSTE: seçim ek]]
 
       if (gorunen.length === 0) {
         govde.appendChild(el('p', { class: 'sessiz', text: 'Bu ölçütlere uyan hesap yok.' }));
@@ -2097,7 +2090,6 @@
     );
   }
 
-  // [[BÖLÜM: arayüz ek]]
 
   // Denetim ve test için salt okunur API (sayfa değişkenlerine yazmaz, yalnızca bu adı tanımlar).
   window.igManuelAsistan = API;
