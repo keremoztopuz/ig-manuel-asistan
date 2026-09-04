@@ -823,6 +823,12 @@
     table.tablo { border-collapse: collapse; width: 100%; font-size: 13px; }
     table.tablo th, table.tablo td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
     table.tablo th { background: var(--bg2); position: sticky; top: 0; }
+    table.tablo a { color: var(--accent); text-decoration: none; }
+    table.tablo a:hover { text-decoration: underline; }
+    .alt-sekmeler { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+    .alt-sekmeler button.etkin { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+    input[type="search"] { min-width: 160px; }
+    label.satir { cursor: pointer; }
     /* [[STİL: ek]] */
   `;
 
@@ -843,6 +849,14 @@
     kullaniciAdiOnaylandi: false,
     analiz: null, // analizEt() sonucu
     grupDahil: false, // DM hesabında grup konuşmaları da sayılsın mı (varsayılan: hayır)
+    secilenler: new Set(), // seçili hesapların norm adları (sekmeler arası ortak)
+    liste: {
+      sekme: 'takipEtmeyenler',
+      arama: '',
+      siralama: { alan: 'kullaniciAdi', yon: 1 },
+      filtreler: { dm: 'hepsi', isletme: 'hepsi', kaynak: 'hepsi', secili: 'hepsi' },
+      sayfa: 1,
+    },
     // [[DURUM: alanlar]]
   };
 
@@ -956,6 +970,8 @@
     durum.kullaniciAdim = '';
     durum.kullaniciAdiOnaylandi = false;
     durum.analiz = null;
+    durum.secilenler = new Set();
+    durum.liste.sayfa = 1;
     // [[SIFIRLA: ek alanlar]]
     ciz();
   }
@@ -1174,9 +1190,241 @@
     kap.appendChild(el('div', { class: 'tablo-kap' }, tablo));
   }
 
+  // ---------------------------------------------------------------------------
+  // Profil açma
+  // Bu aracın yaptığı TEK dış işlem: kullanıcı düğmeye bastığında profil sayfasını
+  // yeni sekmede açmak. Herhangi bir Instagram API uç noktası çağrılmaz, hiçbir
+  // takip/takipçi/istek durumu değiştirilmez.
+  // ---------------------------------------------------------------------------
+
+  function profilUrl(norm) {
+    return 'https://www.instagram.com/' + encodeURIComponent(norm) + '/';
+  }
+
+  function profiliAc(norm) {
+    window.open(profilUrl(norm), '_blank', 'noopener,noreferrer');
+  }
+
+  function tarihBicimle(ms) {
+    if (typeof ms !== 'number' || !isFinite(ms)) return '–';
+    try {
+      return new Date(ms).toLocaleDateString('tr-TR', { year: 'numeric', month: '2-digit', day: '2-digit' });
+    } catch (_hata) {
+      return new Date(ms).toISOString().slice(0, 10);
+    }
+  }
+
+  function sonDmMetni(h) {
+    const d = h.sonDm;
+    if (d.durum === 'var' || d.durum === 'eski') {
+      const ek = d.eslesme === 'ad' ? ' (ad eşleşmesi, kesin değil)' : d.eslesme === 'grup-ad' ? ' (grup)' : '';
+      return tarihBicimle(d.zamanMs) + ' · ' + DM_DURUM_ETIKETLERI[d.durum] + ek;
+    }
+    return DM_DURUM_ETIKETLERI[d.durum] || d.durum;
+  }
+
+  function isletmeMetni(h) {
+    if (h.isletme.durum === 'veriEvet') return 'İşletme (veride belirtilmiş)';
+    if (h.isletme.durum === 'manuelEvet') return 'İşletme (elle işaretlendi)';
+    return 'Doğrulanamaz';
+  }
+
+  const SIRALAMA_ALANLARI = {
+    kullaniciAdi: { etiket: 'Kullanıcı adı', deger: (h) => h.norm },
+    iliski: { etiket: 'İlişki', deger: (h) => ILISKI_ETIKETLERI[h.iliski] },
+    sonDm: { etiket: 'Son DM', deger: (h) => (h.sonDm.zamanMs === null ? -1 : h.sonDm.zamanMs) },
+    isletme: { etiket: 'İşletme', deger: (h) => (h.isletme.durum === 'dogrulanamaz' ? 1 : 0) },
+    takipTarihi: { etiket: 'Takip tarihi', deger: (h) => h.takipTarihiMs || h.takipciTarihiMs || h.istekTarihiMs || -1 },
+  };
+
+  function gorunenHesaplar() {
+    const a = durum.analiz;
+    if (!a) return [];
+    const tanim = LISTE_TANIMLARI.find((t) => t.ad === durum.liste.sekme);
+    const normSet = new Set(a.listeler[tanim.ad]);
+    const arama = normalizeKullaniciAdi(durum.liste.arama);
+    const f = durum.liste.filtreler;
+    let sonuc = a.hesaplar.filter((h) => {
+      if (!normSet.has(h.norm)) return false;
+      if (arama && !h.norm.includes(arama)) return false;
+      if (f.dm !== 'hepsi' && h.sonDm.durum !== f.dm) return false;
+      if (f.isletme === 'evet' && h.isletme.durum === 'dogrulanamaz') return false;
+      if (f.isletme === 'hayir' && h.isletme.durum !== 'dogrulanamaz') return false;
+      if (f.kaynak !== 'hepsi' && !h.kaynakDosyalar.includes(f.kaynak)) return false;
+      if (f.secili === 'evet' && !durum.secilenler.has(h.norm)) return false;
+      return true;
+    });
+    const alan = SIRALAMA_ALANLARI[durum.liste.siralama.alan] || SIRALAMA_ALANLARI.kullaniciAdi;
+    const yon = durum.liste.siralama.yon;
+    sonuc.sort((x, y) => {
+      const a1 = alan.deger(x);
+      const b1 = alan.deger(y);
+      if (a1 < b1) return -1 * yon;
+      if (a1 > b1) return 1 * yon;
+      return x.norm.localeCompare(y.norm);
+    });
+    return sonuc;
+  }
+
   function cizListeler(kap) {
     kap.appendChild(el('h2', { text: 'Listeler' }));
-    kap.appendChild(el('p', { class: 'sessiz', text: 'Önce Veri sekmesinden arşiv dosyalarını yükleyin.' }));
+    const a = durum.analiz;
+    if (!a) {
+      kap.appendChild(el('p', { class: 'sessiz', text: 'Önce Veri sekmesinden arşiv dosyalarını yükleyin ve kullanıcı adınızı onaylayın.' }));
+      return;
+    }
+
+    // Özet ve uyarılar
+    kap.appendChild(
+      el('p', { class: 'sessiz' }, [
+        'Toplam ' + a.hesaplar.length + ' tekil hesap · takipçi kaydı ' + a.sayilar.takipciler +
+          ' · takip kaydı ' + a.sayilar.takipEdilenler + ' · gönderilen istek ' + a.sayilar.istekGonderilen +
+          (a.dm && a.dm.arsivVar ? ' · DM konuşması ' + a.dm.konusmaSayisi + ' (birebir ' + a.dm.birebirSayisi + ', grup ' + a.dm.grupSayisi + ')' : ' · DM arşivi yok'),
+      ])
+    );
+    if (a.uyarilar.length > 0) {
+      kap.appendChild(el('ul', { class: 'liste sessiz' }, a.uyarilar.map((u) => el('li', { text: u }))));
+    }
+
+    // Sekmeler
+    const sekmeler = el('div', { class: 'alt-sekmeler' });
+    for (const t of LISTE_TANIMLARI) {
+      sekmeler.appendChild(
+        el('button', {
+          class: 'kucuk' + (durum.liste.sekme === t.ad ? ' etkin' : ''),
+          text: t.baslik + ' (' + a.listeler[t.ad].length + ')',
+          onclick: () => {
+            durum.liste.sekme = t.ad;
+            durum.liste.sayfa = 1;
+            ciz();
+          },
+        })
+      );
+    }
+    kap.appendChild(sekmeler);
+
+    const tanim = LISTE_TANIMLARI.find((t) => t.ad === durum.liste.sekme);
+    kap.appendChild(el('h3', { text: tanim.baslik }));
+    kap.appendChild(el('p', { class: 'sessiz', text: tanim.aciklama }));
+    if (tanim.ad === 'dmYok') {
+      const grupKutu = el('input', { type: 'checkbox', checked: durum.grupDahil });
+      grupKutu.addEventListener('change', () => {
+        durum.grupDahil = grupKutu.checked;
+        analiziCalistir();
+        ciz();
+      });
+      kap.appendChild(el('label', { class: 'satir' }, [grupKutu, 'Grup konuşmalarını da say (varsayılan: kapalı)']));
+    }
+    // [[LİSTE: sekme ek]]
+
+    // Araç çubuğu: arama, sıralama, filtreler
+    const aramaGirdi = el('input', { type: 'search', value: durum.liste.arama, placeholder: 'Kullanıcı adında ara' });
+    aramaGirdi.addEventListener('input', () => {
+      durum.liste.arama = aramaGirdi.value;
+      durum.liste.sayfa = 1;
+      cizGovde();
+    });
+    const siralamaSec = el('select', {}, Object.entries(SIRALAMA_ALANLARI).map(([k, v]) => el('option', { value: k, text: v.etiket, selected: durum.liste.siralama.alan === k })));
+    siralamaSec.addEventListener('change', () => {
+      durum.liste.siralama.alan = siralamaSec.value;
+      cizGovde();
+    });
+    const yonDugme = el('button', { class: 'kucuk', text: durum.liste.siralama.yon === 1 ? 'Artan ↑' : 'Azalan ↓', onclick: () => {
+      durum.liste.siralama.yon *= -1;
+      ciz();
+    } });
+    const dmSec = el('select', {}, [
+      el('option', { value: 'hepsi', text: 'DM: hepsi' }),
+      ...Object.entries(DM_DURUM_ETIKETLERI).map(([k, v]) => el('option', { value: k, text: 'DM: ' + v, selected: durum.liste.filtreler.dm === k })),
+    ]);
+    dmSec.addEventListener('change', () => { durum.liste.filtreler.dm = dmSec.value; durum.liste.sayfa = 1; cizGovde(); });
+    const isletmeSec = el('select', {}, [
+      el('option', { value: 'hepsi', text: 'İşletme: hepsi' }),
+      el('option', { value: 'evet', text: 'İşletme: işaretli', selected: durum.liste.filtreler.isletme === 'evet' }),
+      el('option', { value: 'hayir', text: 'İşletme: doğrulanamaz', selected: durum.liste.filtreler.isletme === 'hayir' }),
+    ]);
+    isletmeSec.addEventListener('change', () => { durum.liste.filtreler.isletme = isletmeSec.value; durum.liste.sayfa = 1; cizGovde(); });
+    const kaynaklar = Array.from(new Set(a.hesaplar.flatMap((h) => h.kaynakDosyalar))).sort();
+    const kaynakSec = el('select', {}, [
+      el('option', { value: 'hepsi', text: 'Kaynak: hepsi' }),
+      ...kaynaklar.map((k) => el('option', { value: k, text: 'Kaynak: ' + dosyaAdi(k), selected: durum.liste.filtreler.kaynak === k })),
+    ]);
+    kaynakSec.addEventListener('change', () => { durum.liste.filtreler.kaynak = kaynakSec.value; durum.liste.sayfa = 1; cizGovde(); });
+    const seciliSec = el('select', {}, [
+      el('option', { value: 'hepsi', text: 'Seçim: hepsi' }),
+      el('option', { value: 'evet', text: 'Seçim: yalnızca seçililer', selected: durum.liste.filtreler.secili === 'evet' }),
+    ]);
+    seciliSec.addEventListener('change', () => { durum.liste.filtreler.secili = seciliSec.value; durum.liste.sayfa = 1; cizGovde(); });
+
+    kap.appendChild(el('div', { class: 'satir' }, [aramaGirdi, siralamaSec, yonDugme, dmSec, isletmeSec, kaynakSec, seciliSec]));
+
+    // Seçim denetimleri (kasıtlı olarak "tümünü seç" yoktur; yalnızca görünenler seçilebilir)
+    const secimSatiri = el('div', { class: 'satir' });
+    kap.appendChild(secimSatiri);
+
+    const govde = el('div');
+    kap.appendChild(govde);
+
+    function cizGovde() {
+      temizle(secimSatiri);
+      temizle(govde);
+      const gorunen = gorunenHesaplar();
+      const sayfaBoyu = 200;
+      const gosterilen = gorunen.slice(0, durum.liste.sayfa * sayfaBoyu);
+
+      secimSatiri.appendChild(el('span', { class: 'sessiz', text: gorunen.length + ' hesap görünüyor · ' + durum.secilenler.size + ' seçili' }));
+      secimSatiri.appendChild(el('button', { class: 'kucuk', text: 'Görünenleri seç (' + gosterilen.length + ')', disabled: gosterilen.length === 0, onclick: () => {
+        for (const h of gosterilen) durum.secilenler.add(h.norm);
+        cizGovde();
+      } }));
+      secimSatiri.appendChild(el('button', { class: 'kucuk', text: 'Seçimi temizle', disabled: durum.secilenler.size === 0, onclick: () => {
+        durum.secilenler.clear();
+        cizGovde();
+      } }));
+      // [[LİSTE: seçim ek]]
+
+      if (gorunen.length === 0) {
+        govde.appendChild(el('p', { class: 'sessiz', text: 'Bu ölçütlere uyan hesap yok.' }));
+        return;
+      }
+
+      const tablo = el('table', { class: 'tablo' }, [
+        el('thead', {}, el('tr', {}, ['Seç', 'Kullanıcı adı', 'İlişki', 'Son DM', 'İşletme', 'Kaynak', ''].map((b) => el('th', { text: b })))),
+        el('tbody', {}, gosterilen.map((h) => cizHesapSatiri(h, cizGovde))),
+      ]);
+      govde.appendChild(el('div', { class: 'tablo-kap' }, tablo));
+      if (gosterilen.length < gorunen.length) {
+        govde.appendChild(el('button', { text: 'Daha fazla göster (' + (gorunen.length - gosterilen.length) + ' kaldı)', onclick: () => {
+          durum.liste.sayfa++;
+          cizGovde();
+        } }));
+      }
+    }
+    cizGovde();
+  }
+
+  function cizHesapSatiri(h, yenidenCiz) {
+    const kutu = el('input', { type: 'checkbox', checked: durum.secilenler.has(h.norm), 'aria-label': h.kullaniciAdi + ' seç' });
+    kutu.addEventListener('change', () => {
+      if (kutu.checked) durum.secilenler.add(h.norm);
+      else durum.secilenler.delete(h.norm);
+      yenidenCiz();
+    });
+    // Bağlantı: yalnızca profil sayfası. Yeni sekmede, referrer/opener olmadan.
+    const baglanti = el('a', { href: profilUrl(h.norm), target: '_blank', rel: 'noopener noreferrer', text: '@' + h.kullaniciAdi });
+    return el('tr', {}, [
+      el('td', {}, kutu),
+      el('td', {}, [baglanti, h.kullaniciAdi.toLowerCase() !== h.norm ? el('span', { class: 'sessiz', text: ' (' + h.norm + ')' }) : null]),
+      el('td', { text: ILISKI_ETIKETLERI[h.iliski] }),
+      el('td', { class: h.sonDm.durum === 'var' ? '' : 'sessiz', text: sonDmMetni(h) }),
+      el('td', {}, cizIsletmeHucresi(h, yenidenCiz)),
+      el('td', {}, h.kaynakDosyalar.map((k) => el('code', { text: dosyaAdi(k), title: k }))),
+      el('td', {}, el('button', { class: 'kucuk', text: 'Profili aç', onclick: () => profiliAc(h.norm) })),
+    ]);
+  }
+
+  function cizIsletmeHucresi(h, _yenidenCiz) {
+    return [el('span', { class: h.isletme.durum === 'dogrulanamaz' ? 'sessiz' : '', text: isletmeMetni(h) })];
   }
 
   function cizKuyruk(kap) {
