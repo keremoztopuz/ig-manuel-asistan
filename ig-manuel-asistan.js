@@ -1748,10 +1748,20 @@
     const oge = k.ogeler[k.indeks];
     if ((k.durum === 'etkin' || k.durum === 'duraklatildi') && oge) {
       const kart = el('div', { class: 'kart vurgulu' });
-      kart.appendChild(el('h3', { text: 'Sıradaki (' + (k.indeks + 1) + '/' + k.ogeler.length + '): @' + oge.kullaniciAdi }));
-      kart.appendChild(el('p', {}, [el('strong', { text: ILISKI_ETIKETLERI[oge.iliski] }), ' — ', oge.talimat]));
+      const beklemede = !!k.geriSayim || k.sonrakiHazir;
+      const siradaki = k.ogeler[k.indeks + 1];
+      if (beklemede) {
+        // Bu öğe az önce kapatıldı; kart artık bekleme ve bir sonraki hesabı gösterir.
+        kart.appendChild(el('h3', { text: 'Kapatıldı (' + (k.indeks + 1) + '/' + k.ogeler.length + '): @' + oge.kullaniciAdi + ' — ' + (oge.durum === 'tamamlandi' ? 'tamamlandı olarak işaretlendi (yerel kayıt)' : 'atlandı') }));
+        if (siradaki) {
+          kart.appendChild(el('p', {}, [el('strong', { text: 'Sıradaki: @' + siradaki.kullaniciAdi }), ' · ' + ILISKI_ETIKETLERI[siradaki.iliski] + ' — ' + siradaki.talimat]));
+        }
+      } else {
+        kart.appendChild(el('h3', { text: 'Sıradaki (' + (k.indeks + 1) + '/' + k.ogeler.length + '): @' + oge.kullaniciAdi }));
+        kart.appendChild(el('p', {}, [el('strong', { text: ILISKI_ETIKETLERI[oge.iliski] }), ' — ', oge.talimat]));
+      }
 
-      const islemAcik = k.durum === 'etkin' && !k.geriSayim && !k.sonrakiHazir;
+      const islemAcik = k.durum === 'etkin' && !beklemede;
 
       if (k.geriSayim) {
         kart.appendChild(
