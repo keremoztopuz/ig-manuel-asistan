@@ -1,0 +1,11 @@
+{
+  "name": "ig-manuel-asistan",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Instagram veri arşivini yerel olarak analiz eden, hiçbir otomatik işlem yapmayan manuel asistan",
+  "scripts": {
+    "test": "node --test test/analiz.test.js",
+    "fixtures": "node test/fixtures/olustur.js"
+  },
+  "license": "MIT"
+}

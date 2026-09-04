@@ -1,0 +1,21 @@
+{
+  "participants": [
+    {
+      "name": "Yabanci"
+    },
+    {
+      "name": "Test KullanÄ±cÄ±sÄ±"
+    }
+  ],
+  "messages": [
+    {
+      "sender_name": "Yabanci",
+      "timestamp_ms": 1788393600000,
+      "content": "Reklam",
+      "is_geoblocked_for_viewer": false
+    }
+  ],
+  "title": "Yabanci",
+  "is_still_participant": true,
+  "thread_path": "message_requests/yabanci_17842000000000005"
+}

@@ -1,0 +1,27 @@
+{
+  "participants": [
+    {
+      "name": "AyÅŸe YÄ±lmaz"
+    },
+    {
+      "name": "Test KullanÄ±cÄ±sÄ±"
+    }
+  ],
+  "messages": [
+    {
+      "sender_name": "AyÅŸe YÄ±lmaz",
+      "timestamp_ms": 1785888000000,
+      "content": "Selam",
+      "is_geoblocked_for_viewer": false
+    },
+    {
+      "sender_name": "Test KullanÄ±cÄ±sÄ±",
+      "timestamp_ms": 1785801600000,
+      "content": "Merhaba",
+      "is_geoblocked_for_viewer": false
+    }
+  ],
+  "title": "AyÅŸe YÄ±lmaz",
+  "is_still_participant": true,
+  "thread_path": "inbox/ayse_yilmaz_17842000000000001"
+}

@@ -2,28 +2,29 @@
 .DS_Store
 Thumbs.db
 
-# Gerçek Instagram arşivi asla repoya girmemeli
+# Gerçek Instagram arşivi asla repoya girmemeli (kök dizine açılmış arşiv klasörleri).
+# test/fixtures/arsiv altındaki SENTETİK örnekler bu kurallardan etkilenmez.
 *.zip
-connections/
-your_instagram_activity/
-personal_information/
-security_and_login_information/
-ads_information/
-apps_and_websites_off_of_instagram/
-logged_information/
-media/
-preferences/
-veri/
-data/
-arsiv/
-export/
-instagram-*/
+/connections/
+/your_instagram_activity/
+/personal_information/
+/security_and_login_information/
+/ads_information/
+/apps_and_websites_off_of_instagram/
+/logged_information/
+/media/
+/preferences/
+/veri/
+/data/
+/arsiv/
+/export/
+/instagram-*/
 
 # Araçtan dışa aktarılan raporlar
 ig-manuel-asistan-*.json
 ig-manuel-asistan-*.csv
 
-# Editör
+# Editör / araçlar
 .vscode/
 .idea/
 node_modules/

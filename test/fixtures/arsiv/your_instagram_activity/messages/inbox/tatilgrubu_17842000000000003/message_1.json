@@ -1,0 +1,24 @@
+{
+  "participants": [
+    {
+      "name": "sessiz_hesap"
+    },
+    {
+      "name": "Mehmet Kaya"
+    },
+    {
+      "name": "Test KullanÄ±cÄ±sÄ±"
+    }
+  ],
+  "messages": [
+    {
+      "sender_name": "sessiz_hesap",
+      "timestamp_ms": 1788307200000,
+      "content": "Grup mesajı",
+      "is_geoblocked_for_viewer": false
+    }
+  ],
+  "title": "Tatil grubu",
+  "is_still_participant": true,
+  "thread_path": "inbox/tatilgrubu_17842000000000003"
+}

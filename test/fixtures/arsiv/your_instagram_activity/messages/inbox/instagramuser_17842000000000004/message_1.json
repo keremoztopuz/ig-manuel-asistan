@@ -1,0 +1,21 @@
+{
+  "participants": [
+    {
+      "name": "Instagram User"
+    },
+    {
+      "name": "Test KullanÄ±cÄ±sÄ±"
+    }
+  ],
+  "messages": [
+    {
+      "sender_name": "Instagram User",
+      "timestamp_ms": 1785024000000,
+      "content": "Merhaba",
+      "is_geoblocked_for_viewer": false
+    }
+  ],
+  "title": "Instagram User",
+  "is_still_participant": false,
+  "thread_path": "inbox/instagramuser_17842000000000004"
+}

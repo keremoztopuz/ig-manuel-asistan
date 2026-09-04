@@ -1,0 +1,21 @@
+{
+  "participants": [
+    {
+      "name": "Mehmet Kaya"
+    },
+    {
+      "name": "Test KullanÄ±cÄ±sÄ±"
+    }
+  ],
+  "messages": [
+    {
+      "sender_name": "Mehmet Kaya",
+      "timestamp_ms": 1745280000000,
+      "content": "Nasılsın",
+      "is_geoblocked_for_viewer": false
+    }
+  ],
+  "title": "Mehmet Kaya",
+  "is_still_participant": true,
+  "thread_path": "inbox/mehmet.kaya_17842000000000002"
+}

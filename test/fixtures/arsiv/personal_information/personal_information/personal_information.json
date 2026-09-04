@@ -1,0 +1,20 @@
+{
+  "profile_user": [
+    {
+      "title": "",
+      "media_map_data": {},
+      "string_map_data": {
+        "Username": {
+          "href": "",
+          "value": "test_kullanicisi",
+          "timestamp": 0
+        },
+        "Name": {
+          "href": "",
+          "value": "Test KullanÄ±cÄ±sÄ±",
+          "timestamp": 0
+        }
+      }
+    }
+  ]
+}
