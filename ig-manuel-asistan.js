@@ -861,6 +861,53 @@
     tr.vurgulu td { background: var(--bg2); }
     textarea { width: 100%; resize: vertical; }
     .rozet { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 10px; font-size: 11px; background: var(--bg2); color: var(--muted); border: 1px solid var(--border); }
+
+    /* Koyu tema: sistem tercihi (elle "açık" seçilmediyse) ya da elle "koyu" */
+    .panel[data-tema="koyu"] {
+      --bg: #15181c;
+      --bg2: #1f242a;
+      --fg: #e8ebef;
+      --muted: #9aa5b1;
+      --border: #333a42;
+      --accent: #4ea1ff;
+      --accent-fg: #0b1220;
+      --danger: #ff6b6b;
+      --ok: #6ccf7a;
+      --warn-bg: #3a3010;
+      --warn-fg: #ffe08a;
+      --shadow: 0 8px 32px rgba(0,0,0,.6);
+      color-scheme: dark;
+    }
+    @media (prefers-color-scheme: dark) {
+      .panel:not([data-tema="acik"]) {
+        --bg: #15181c;
+        --bg2: #1f242a;
+        --fg: #e8ebef;
+        --muted: #9aa5b1;
+        --border: #333a42;
+        --accent: #4ea1ff;
+        --accent-fg: #0b1220;
+        --danger: #ff6b6b;
+        --ok: #6ccf7a;
+        --warn-bg: #3a3010;
+        --warn-fg: #ffe08a;
+        --shadow: 0 8px 32px rgba(0,0,0,.6);
+        color-scheme: dark;
+      }
+    }
+
+    /* Dar ekranlar */
+    @media (max-width: 820px) {
+      .panel { width: 100vw; border-left: none; }
+      .icerik { padding: 10px; }
+      .baslik { padding: 8px 10px; }
+      .uyari { margin: 8px 10px 0; }
+      .gezinti { padding: 8px 10px 0; }
+      table.tablo { font-size: 12px; }
+      table.tablo th, table.tablo td { padding: 4px 6px; }
+      input[type="search"] { min-width: 120px; flex: 1; }
+      select { max-width: 100%; }
+    }
     /* [[STİL: ek]] */
   `;
 
@@ -871,6 +918,7 @@
   const durum = {
     goruntu: 'veri', // veri | listeler | kuyruk | kayit | bilgi
     kucultulmus: false,
+    tema: 'otomatik', // otomatik | acik | koyu
     kuyruk: null, // etkin kuyruk varsa nesne (ileriki bölümlerde doldurulur)
     dosyalar: [], // { yol, ad, boyut, json, tur, kayitlar, kayitSayisi, not }
     atlananDosyaSayisi: 0,
@@ -1055,11 +1103,27 @@
   function ciz() {
     temizle(panel);
     panel.classList.toggle('kucultulmus', durum.kucultulmus);
+    if (durum.tema === 'otomatik') panel.removeAttribute('data-tema');
+    else panel.setAttribute('data-tema', durum.tema);
 
     // Başlık
+    const TEMA_ETIKETLERI = { otomatik: 'Tema: otomatik', acik: 'Tema: açık', koyu: 'Tema: koyu' };
+    const TEMA_SIRASI = ['otomatik', 'acik', 'koyu'];
     panel.appendChild(
       el('div', { class: 'baslik' }, [
         el('h1', {}, ['Instagram Manuel Asistan', el('span', { class: 'surum', text: 'v' + SURUM })]),
+        durum.kucultulmus
+          ? null
+          : el('button', {
+              class: 'kucuk',
+              text: TEMA_ETIKETLERI[durum.tema],
+              title: 'Açık / koyu tema',
+              onclick: () => {
+                durum.tema = TEMA_SIRASI[(TEMA_SIRASI.indexOf(durum.tema) + 1) % TEMA_SIRASI.length];
+                yerelDurumKaydet();
+                ciz();
+              },
+            }),
         el('button', {
           class: 'kucuk',
           text: durum.kucultulmus ? 'Büyüt' : 'Küçült',
@@ -1770,6 +1834,7 @@
     const paket = {
       surum: SURUM,
       kaydedildiMs: Date.now(),
+      tema: durum.tema,
       kullaniciAdim: durum.kullaniciAdim,
       manuelIsletme: Array.from(durum.manuelIsletme),
       gunluk: durum.gunluk,
@@ -1809,6 +1874,7 @@
       return false;
     }
     if (!nesneMi(paket)) return false;
+    if (['otomatik', 'acik', 'koyu'].includes(paket.tema)) durum.tema = paket.tema;
     if (typeof paket.kullaniciAdim === 'string') durum.kullaniciAdim = paket.kullaniciAdim;
     if (dizimi(paket.manuelIsletme)) durum.manuelIsletme = new Set(paket.manuelIsletme.filter((x) => typeof x === 'string'));
     if (dizimi(paket.gunluk)) durum.gunluk = paket.gunluk.filter(nesneMi);
